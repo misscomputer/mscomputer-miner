@@ -1,0 +1,753 @@
+// Copyright (c) 2026 Ms. Computer. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-MsComputer-Miner
+
+package durable
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/misscomputer/mscomputer-miner/pkg/protocol"
+	"github.com/misscomputer/mscomputer-miner/pkg/sandbox"
+)
+
+// opsClock is a settable clock. AdmitOp and LookupExec read it inside
+// their transactions.
+type opsClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *opsClock) read() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *opsClock) set(t time.Time) { c.mu.Lock(); c.now = t; c.mu.Unlock() }
+
+type opsFixture struct {
+	store   *Store
+	path    string
+	leases  *SandboxLeases
+	ops     *SandboxOps
+	clock   *opsClock
+	parties sandboxParties
+	lease   protocol.SandboxLeaseV1
+}
+
+// newOpsFixture opens a real store with a running lease, created through
+// the lease lane itself (hold, commit, mark running).
+func newOpsFixture(t *testing.T) *opsFixture {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	ctx := context.Background()
+	leases, err := store.EnableSandboxLeases(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &opsClock{now: sandboxT0.Add(time.Minute)}
+	ops, err := leases.EnableSandboxOps(ctx, clock.read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parties := newSandboxParties(0x11, "5Hvalidator")
+	reservation := parties.reservation(t, 1, nonce(1), sandboxT0)
+	if _, err := leases.Hold(ctx, reservation, capacityFor(4), sandboxT0); err != nil {
+		t.Fatal(err)
+	}
+	lease := parties.lease(t, reservation, nonce(101), sandboxT0, nil)
+	if outcome, err := leases.CommitLease(ctx, lease, sandboxT0); err != nil || !outcome.Start {
+		t.Fatalf("commit: %+v %v", outcome, err)
+	}
+	if running, err := leases.MarkLeaseRunning(ctx, protocol.SandboxLeaseIDV1(lease), sandboxT0); err != nil || !running {
+		t.Fatalf("mark running: %v %v", running, err)
+	}
+	return &opsFixture{store: store, path: path, leases: leases, ops: ops, clock: clock, parties: parties, lease: lease}
+}
+
+func u64p(value uint64) *uint64 { return &value }
+
+// op returns a signed op request on the fixture lease, issued at issued
+// with a 30 s window.
+func (f *opsFixture) op(t *testing.T, kind string, opNonce int, issued time.Time, mutate func(*protocol.SandboxOpRequestV1)) protocol.SandboxOpRequestV1 {
+	t.Helper()
+	return f.opOn(t, f.parties, f.lease, kind, opNonce, issued, mutate)
+}
+
+func (f *opsFixture) opOn(t *testing.T, parties sandboxParties, lease protocol.SandboxLeaseV1, kind string, opNonce int, issued time.Time, mutate func(*protocol.SandboxOpRequestV1)) protocol.SandboxOpRequestV1 {
+	t.Helper()
+	digest, err := protocol.SandboxDigestV1(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseID := protocol.SandboxLeaseIDV1(lease)
+	payload := protocol.SandboxContentDigestV1([]byte(`{"argv":["true"],"cwd":"/","env":{},"stdin_b64":null}`))
+	r := protocol.SandboxOpRequestV1{
+		ExpiresAt: sandboxStamp(issued.Add(30 * time.Second)), Generation: lease.Generation, IssuedAt: sandboxStamp(issued),
+		LeaseDigest: digest, LeaseID: leaseID, MinerID: lease.MinerID, Op: kind, OpNonce: nonce(opNonce), SandboxID: lease.SandboxID,
+		Schema: protocol.SandboxOpRequestSchema, SchemaVersion: 1, Subnet: parties.binding(), WorkloadKind: sandbox.WorkloadKind,
+	}
+	switch kind {
+	case sandbox.OpExecStart:
+		r.PayloadDigest, r.PayloadBytes, r.TimeoutMS, r.MaxOutputBytes = &payload, 52, u64p(60000), u64p(1<<20)
+	case sandbox.OpExecRead:
+		execID := leaseID + "-op-" + nonce(opNonce-1)
+		r.ExecID, r.Offset, r.Limit, r.Stream = &execID, u64p(0), u64p(4096), sandboxCode(sandbox.ExecStdout)
+	case sandbox.OpFileStat:
+		r.Path = sandboxCode("/workspace")
+	case sandbox.OpFileWrite:
+		mode := uint32(0o644)
+		r.Path, r.PayloadDigest, r.PayloadBytes, r.Offset, r.Mode = sandboxCode("/workspace/secret-name-7c1f.txt"), &payload, 52, u64p(0), &mode
+	}
+	if mutate != nil {
+		mutate(&r)
+	}
+	if err := protocol.SignSandboxOpRequestV1(&r, parties.validator); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func opRows(t *testing.T, store *Store) (ops, execs int) {
+	t.Helper()
+	if err := store.db.QueryRow(`SELECT (SELECT COUNT(*) FROM sandbox_ops),(SELECT COUNT(*) FROM sandbox_execs)`).Scan(&ops, &execs); err != nil {
+		t.Fatal(err)
+	}
+	return ops, execs
+}
+
+func schemaWithoutOps(t *testing.T, store *Store) string {
+	t.Helper()
+	rows, err := store.db.Query(`SELECT type,name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('sandbox_ops','sandbox_execs','sandbox_ops_clock') ORDER BY type,name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var dump strings.Builder
+	for rows.Next() {
+		var kind, name, ddl string
+		if err := rows.Scan(&kind, &name, &ddl); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&dump, "%s %s %s\n", kind, name, ddl)
+	}
+	return dump.String()
+}
+
+func opsTables(t *testing.T, store *Store) int {
+	t.Helper()
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE tbl_name IN ('sandbox_ops','sandbox_execs','sandbox_ops_clock')`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// The ops tables exist only after the explicit opt-in. Open and the lease
+// lane never create them. Enabling them leaves every other table definition,
+// the lease tables included, byte-identical, and that holds across a reopen.
+func TestSandboxOpsAreOptInAndLeaveOtherTablesUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	leases, err := store.EnableSandboxLeases(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := opsTables(t, store); n != 0 {
+		t.Fatalf("Open plus the lease lane created %d ops schema objects", n)
+	}
+	before := schemaWithoutOps(t, store)
+	for range 2 {
+		if _, err := leases.EnableSandboxOps(ctx, time.Now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opsTables(t, store) == 0 || schemaWithoutOps(t, store) != before {
+		t.Fatal("enabling ops did not create only the ops tables")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if schemaWithoutOps(t, reopened) != before {
+		t.Fatal("reopening changed the other tables")
+	}
+}
+
+// Write-ahead and replay. The first admission of an exec_start is
+// durable and permits a start once; an exact replay never permits a
+// second. A different document for the same op_id is equivocation and
+// changes nothing. The exec is then found exactly by its exec_id.
+func TestSandboxOpAdmissionIsWriteAheadAndReplaySafe(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	start := f.op(t, sandbox.OpExecStart, 1, at, nil)
+	first, err := f.ops.AdmitOp(ctx, start)
+	if err != nil || !first.Start || first.Replay || !first.AdmittedAt.Equal(at) {
+		t.Fatalf("first admission %+v %v", first, err)
+	}
+	// A recorded op is a replay before its window is checked: the window
+	// closing between the bound admission check and the store does not turn
+	// a replay into an unanswered expiry.
+	for _, when := range []time.Duration{5 * time.Second, 31 * time.Second} {
+		f.clock.set(at.Add(when))
+		replay, err := f.ops.AdmitOp(ctx, start)
+		if err != nil || replay.Start || !replay.Replay || !replay.AdmittedAt.Equal(at) {
+			t.Fatalf("replay %v after admission: %+v %v", when, replay, err)
+		}
+	}
+	other := f.op(t, sandbox.OpExecStart, 1, at, func(r *protocol.SandboxOpRequestV1) { r.TimeoutMS = u64p(1000) })
+	if _, err := f.ops.AdmitOp(ctx, other); !errors.Is(err, ErrSandboxConflict) {
+		t.Fatalf("equivocating exec_start: %v", err)
+	}
+	stat := f.op(t, sandbox.OpFileStat, 3, f.clock.read(), nil)
+	if decision, err := f.ops.AdmitOp(ctx, stat); err != nil || decision.Start || decision.Replay {
+		t.Fatalf("file_stat %+v %v", decision, err)
+	}
+	if _, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpFileStat, 3, at, func(r *protocol.SandboxOpRequestV1) { r.Path = sandboxCode("/etc") })); !errors.Is(err, ErrSandboxConflict) {
+		t.Fatalf("equivocating file_stat: %v", err)
+	}
+	if ops, execs := opRows(t, f.store); ops != 2 || execs != 1 {
+		t.Fatalf("rows %d ops %d execs", ops, execs)
+	}
+	found, err := f.ops.LookupExec(ctx, f.op(t, sandbox.OpExecRead, 2, at, nil))
+	if err != nil || !found.Found || found.State != "admitted" || !found.AdmittedAt.Equal(at) {
+		t.Fatalf("lookup of the admitted exec %+v %v", found, err)
+	}
+	missing, err := f.ops.LookupExec(ctx, f.op(t, sandbox.OpExecRead, 9, at, nil))
+	if err != nil || missing.Found || missing.Unavailable != nil {
+		t.Fatalf("lookup of an exec never admitted %+v %v", missing, err)
+	}
+}
+
+// The store re-decides the request window, the lease state and
+// the lease expiry with its own in-transaction clock. A refusal records
+// nothing, and the health fence follows renewals.
+func TestSandboxOpAdmissionRedecidesWindowAndLeaseInTransaction(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	// The request passed its bound check at issue time; the store
+	// decides at the window's end.
+	late := f.op(t, sandbox.OpExecStart, 1, at, nil)
+	f.clock.set(at.Add(30 * time.Second))
+	if _, err := f.ops.AdmitOp(ctx, late); !errors.Is(err, ErrSandboxOpExpired) {
+		t.Fatalf("window closed at the store: %v", err)
+	}
+
+	// The lease expires at T0+10m; a renewal moves it to T0+20m.
+	f.clock.set(sandboxT0.Add(10 * time.Minute))
+	expired, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpExecStart, 2, f.clock.read(), nil))
+	if err != nil || expired.Unavailable == nil || expired.Unavailable.Status != "running" || !expired.Unavailable.ExpiresAt.Equal(sandboxT0.Add(10*time.Minute)) {
+		t.Fatalf("op at lease expiry %+v %v", expired, err)
+	}
+	renewal := f.parties.renewal(t, f.lease, 1, sandboxT0.Add(9*time.Minute), sandboxT0.Add(20*time.Minute))
+	if _, err := f.leases.Renew(ctx, renewal, sandboxT0.Add(9*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if renewed, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpExecStart, 3, f.clock.read(), nil)); err != nil || !renewed.Start {
+		t.Fatalf("op after renewal %+v %v", renewed, err)
+	}
+
+	stranger := newSandboxParties(0x33, "5Hstranger")
+	if _, err := f.ops.AdmitOp(ctx, f.opOn(t, stranger, f.lease, sandbox.OpFileStat, 4, f.clock.read(), nil)); !errors.Is(err, ErrSandboxOpForeign) {
+		t.Fatalf("another validator's op: %v", err)
+	}
+	sibling := f.parties.lease(t, f.parties.reservation(t, 1, nonce(1), sandboxT0), nonce(102), sandboxT0, nil)
+	if _, err := f.ops.AdmitOp(ctx, f.opOn(t, f.parties, sibling, sandbox.OpFileStat, 5, f.clock.read(), nil)); !errors.Is(err, ErrSandboxOpForeign) {
+		t.Fatalf("op naming a lease this miner never committed: %v", err)
+	}
+
+	if _, _, err := f.leases.Release(ctx, f.parties.release(t, 1, f.clock.read()), f.clock.read()); err != nil {
+		t.Fatal(err)
+	}
+	released, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpFileStat, 6, f.clock.read(), nil))
+	if err != nil || released.Unavailable == nil || released.Unavailable.Status != "cleanup" ||
+		released.Unavailable.CleanupStatus == nil || *released.Unavailable.CleanupStatus != "released" {
+		t.Fatalf("op on a released lease %+v %v", released, err)
+	}
+	if ops, execs := opRows(t, f.store); ops != 1 || execs != 1 {
+		t.Fatalf("refusals recorded rows: %d ops %d execs", ops, execs)
+	}
+}
+
+// A lease that was committed but never started cannot run ops.
+func TestSandboxOpOnPendingLeaseRecordsNothing(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	reservation := f.parties.reservation(t, 2, nonce(2), sandboxT0)
+	if _, err := f.leases.Hold(ctx, reservation, capacityFor(4), sandboxT0); err != nil {
+		t.Fatal(err)
+	}
+	pending := f.parties.lease(t, reservation, nonce(201), sandboxT0, nil)
+	if _, err := f.leases.CommitLease(ctx, pending, sandboxT0); err != nil {
+		t.Fatal(err)
+	}
+	request := f.opOn(t, f.parties, pending, sandbox.OpExecStart, 1, f.clock.read(), nil)
+	decision, err := f.ops.AdmitOp(ctx, request)
+	if err != nil || decision.Unavailable == nil || decision.Unavailable.Status != "pending" || decision.Start ||
+		decision.Unavailable.RefusalCode(decision.DecidedAt) != "lease_not_running" {
+		t.Fatalf("op on a pending lease %+v %v", decision, err)
+	}
+	assertRefusedReceipt(t, f, request, "lease_not_running")
+	if ops, _ := opRows(t, f.store); ops != 0 {
+		t.Fatal("refused op was recorded")
+	}
+}
+
+// The caps are decided inside the admission transaction. Twenty concurrent
+// exec_starts admit exactly sixteen. Terminal execs free running slots, and
+// the session cap holds independently of them.
+func TestSandboxExecCapsHoldUnderConcurrency(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	var wait sync.WaitGroup
+	var mu sync.Mutex
+	outcomes := map[string]int{}
+	var limited []protocol.SandboxOpRequestV1
+	for n := range 20 {
+		request := f.op(t, sandbox.OpExecStart, 1000+n, at, nil)
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			decision, err := f.ops.AdmitOp(ctx, request)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil:
+				outcomes["error"]++
+			case decision.Start:
+				outcomes["start"]++
+			case decision.Limited:
+				outcomes["limited"]++
+				limited = append(limited, request)
+			}
+		}()
+	}
+	wait.Wait()
+	if outcomes["start"] != sandbox.MaxRunningExecs || outcomes["limited"] != 20-sandbox.MaxRunningExecs {
+		t.Fatalf("outcomes %v", outcomes)
+	}
+	leaseID := protocol.SandboxLeaseIDV1(f.lease)
+	finish := func(opNonce int) error {
+		return f.ops.RecordExecState(ctx, leaseID+"-op-"+nonce(opNonce), sandbox.ExecStateExited, nil)
+	}
+	finished := 0
+	for n := range 20 {
+		if finish(1000+n) == nil {
+			finished++
+		}
+	}
+	if finished != sandbox.MaxRunningExecs {
+		t.Fatalf("finished %d admitted execs", finished)
+	}
+	// A cap refusal records nothing, so the same document admitted once a
+	// slot is free starts the exec; it is not a replay that never starts.
+	if ops, _ := opRows(t, f.store); ops != sandbox.MaxRunningExecs {
+		t.Fatalf("%d op rows after %d refusals", ops, len(limited))
+	}
+	retry, err := f.ops.AdmitOp(ctx, limited[0])
+	if err != nil || !retry.Start || retry.Replay {
+		t.Fatalf("refused exec_start retried after a slot freed: %+v %v", retry, err)
+	}
+	if err := f.ops.RecordExecState(ctx, protocol.SandboxOpIDV1(limited[0]), sandbox.ExecStateExited, nil); err != nil {
+		t.Fatal(err)
+	}
+	for n := sandbox.MaxRunningExecs + 1; n < sandbox.MaxExecSessions; n++ {
+		decision, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpExecStart, 5000+n, at, nil))
+		if err != nil || !decision.Start {
+			t.Fatalf("session %d: %+v %v", n, decision, err)
+		}
+		if err := finish(5000 + n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if decision, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpExecStart, 9999, at, nil)); err != nil || !decision.Limited {
+		t.Fatalf("session past the cap %+v %v", decision, err)
+	}
+}
+
+// Admission is one transaction: if the exec record cannot be written, the
+// op record is not written either.
+func TestSandboxOpAdmissionIsAtomic(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	if _, err := f.store.db.Exec(`CREATE TRIGGER inject_exec_failure BEFORE INSERT ON sandbox_execs BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	start := f.op(t, sandbox.OpExecStart, 1, f.clock.read(), nil)
+	if _, err := f.ops.AdmitOp(ctx, start); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("admission with a failing exec insert: %v", err)
+	}
+	if ops, execs := opRows(t, f.store); ops != 0 || execs != 0 {
+		t.Fatalf("partial admission left %d ops %d execs", ops, execs)
+	}
+	if _, err := f.store.db.Exec(`DROP TRIGGER inject_exec_failure`); err != nil {
+		t.Fatal(err)
+	}
+	if decision, err := f.ops.AdmitOp(ctx, start); err != nil || !decision.Start {
+		t.Fatalf("admission after the failure %+v %v", decision, err)
+	}
+}
+
+// End to end with the merged protocol rule. An exec_not_found receipt built
+// from a lookup whose DecidedAt is at or after the start's expires_at plus
+// the skew is a definitive non-start. The store then refuses that
+// exec_start for good.
+func TestSandboxExecNotFoundFromTheStoreIsDefinitive(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	start := f.op(t, sandbox.OpExecStart, 1, at, nil)
+	// The read was issued before the window closed; the lookup decides
+	// later, and only its own time may stand as observed_at.
+	read := f.op(t, sandbox.OpExecRead, 2, at.Add(40*time.Second), nil)
+	decided := at.Add(30*time.Second + sandbox.IssueSkew)
+	f.clock.set(decided)
+	lookup, err := f.ops.LookupExec(ctx, read)
+	if err != nil || lookup.Found || lookup.Unavailable != nil || !lookup.DecidedAt.Equal(decided) {
+		t.Fatalf("lookup %+v %v", lookup, err)
+	}
+	digest, err := protocol.SandboxOpDigestV1(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := protocol.SandboxOpReceiptV1{
+		DocumentDigest: digest, ErrorCode: sandboxCode("exec_not_found"), Generation: read.Generation, LeaseID: read.LeaseID,
+		MinerID: read.MinerID, ObservedAt: sandboxStamp(lookup.DecidedAt), Op: read.Op, OpID: protocol.SandboxOpIDV1(read),
+		SandboxID: read.SandboxID, Schema: protocol.SandboxOpReceiptSchema, SchemaVersion: 1, Stage: sandbox.OpStageRefused, Subnet: read.Subnet,
+	}
+	if err := protocol.SignSandboxOpReceiptV1(&receipt, f.parties.miner); err != nil {
+		t.Fatal(err)
+	}
+	never, err := protocol.SandboxExecNeverStartedV1(receipt, read, start, f.parties.miner.Public().(ed25519.PublicKey))
+	if err != nil || !never {
+		t.Fatalf("store lookup did not yield a definitive non-start: %v %v", never, err)
+	}
+	if _, err := f.ops.AdmitOp(ctx, start); !errors.Is(err, ErrSandboxOpExpired) {
+		t.Fatalf("exec_start admitted after a definitive exec_not_found: %v", err)
+	}
+	if _, execs := opRows(t, f.store); execs != 0 {
+		t.Fatal("exec recorded after a definitive exec_not_found")
+	}
+}
+
+// The store stores caller-supplied exec transitions and only guards their
+// monotonicity. It never decides when or why a transition happens.
+func TestSandboxExecStateIsMonotonic(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	for n := range 2 {
+		if _, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpExecStart, n+1, at, nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leaseID := protocol.SandboxLeaseIDV1(f.lease)
+	first, second := leaseID+"-op-"+nonce(1), leaseID+"-op-"+nonce(2)
+	code := sandbox.OpCodeSandboxFailed
+	for index, step := range []struct {
+		exec, state string
+		code        *string
+		wantErr     bool
+	}{
+		{first, sandbox.ExecStateRunning, nil, false},
+		{first, sandbox.ExecStateRunning, nil, false},
+		{first, sandbox.ExecStateExited, nil, false},
+		{first, sandbox.ExecStateExited, nil, false},
+		{first, sandbox.ExecStateRunning, nil, true},
+		{first, sandbox.ExecStateTimedOut, nil, true},
+		{second, sandbox.ExecStateFailed, nil, true},
+		{second, sandbox.ExecStateFailed, sandboxCode("not_an_op_code"), true},
+		{second, sandbox.ExecStateExited, &code, true},
+		{second, "admitted", nil, true},
+		{second, sandbox.ExecStateFailed, &code, false},
+		{second, sandbox.ExecStateCancelled, nil, true},
+		{leaseID + "-op-" + nonce(3), sandbox.ExecStateRunning, nil, true},
+	} {
+		if err := f.ops.RecordExecState(ctx, step.exec, step.state, step.code); (err != nil) != step.wantErr {
+			t.Fatalf("step %d %s: %v", index, step.state, err)
+		}
+	}
+	lookup, err := f.ops.LookupExec(ctx, f.op(t, sandbox.OpExecRead, 2, at, nil))
+	if err != nil || lookup.State != sandbox.ExecStateExited {
+		t.Fatalf("recorded state %+v %v", lookup, err)
+	}
+}
+
+// Rows hold digests and identities only. A path from a signed file_write
+// never reaches the database file.
+func TestSandboxOpRecordsHoldNoPath(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	write := f.op(t, sandbox.OpFileWrite, 1, f.clock.read(), nil)
+	if decision, err := f.ops.AdmitOp(ctx, write); err != nil || decision.Start {
+		t.Fatalf("file_write %+v %v", decision, err)
+	}
+	if _, err := f.store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("secret-name-7c1f")) || bytes.Contains(raw, []byte(*write.PayloadDigest)) {
+		t.Fatal("op request content beyond its digest was persisted")
+	}
+	if !bytes.Contains(raw, []byte(protocol.SandboxOpIDV1(write))) {
+		t.Fatal("negative control: the op record itself is not in the database file")
+	}
+}
+
+// An exact replay never permits a second effect, but its answer comes
+// from the lease's current state. After a release, or after a miner restart
+// (lease Recover through the real lane), replaying an admitted exec_start
+// must not come back as a live replay of a running exec. An equivocating
+// document is still a conflict whatever the lease state.
+func TestSandboxOpReplayOnLeaseThatStoppedAnswersLeaseState(t *testing.T) {
+	ctx := context.Background()
+	leaseID := func(f *opsFixture) string { return protocol.SandboxLeaseIDV1(f.lease) }
+	for _, stop := range []struct {
+		name       string
+		apply      func(t *testing.T, f *opsFixture)
+		wantStatus string
+	}{
+		{"release", func(t *testing.T, f *opsFixture) {
+			if _, _, err := f.leases.Release(ctx, f.parties.release(t, 1, f.clock.read()), f.clock.read()); err != nil {
+				t.Fatal(err)
+			}
+		}, "cleanup"},
+		{"restart", func(t *testing.T, f *opsFixture) {
+			if _, err := f.leases.Recover(ctx, f.clock.read()); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.leases.CompleteLeaseCleanup(ctx, leaseID(f), f.clock.read()); err != nil {
+				t.Fatal(err)
+			}
+		}, "failed"},
+	} {
+		t.Run(stop.name, func(t *testing.T) {
+			f := newOpsFixture(t)
+			at := f.clock.read()
+			start := f.op(t, sandbox.OpExecStart, 1, at, nil)
+			if first, err := f.ops.AdmitOp(ctx, start); err != nil || !first.Start {
+				t.Fatalf("first admission %+v %v", first, err)
+			}
+			f.clock.set(at.Add(5 * time.Second))
+			stop.apply(t, f)
+			replay, err := f.ops.AdmitOp(ctx, start)
+			if err != nil || replay.Start || replay.Unavailable == nil || replay.Unavailable.Status != stop.wantStatus {
+				t.Fatalf("replay after %s answered %+v %v; want the lease state %q and no start", stop.name, replay, err, stop.wantStatus)
+			}
+			other := f.op(t, sandbox.OpExecStart, 1, at, func(r *protocol.SandboxOpRequestV1) { r.TimeoutMS = u64p(1000) })
+			if _, err := f.ops.AdmitOp(ctx, other); !errors.Is(err, ErrSandboxConflict) {
+				t.Fatalf("equivocation after %s: %v", stop.name, err)
+			}
+			if ops, execs := opRows(t, f.store); ops != 1 || execs != 1 {
+				t.Fatalf("rows after %s: %d ops %d execs", stop.name, ops, execs)
+			}
+		})
+	}
+}
+
+// A replay on a lease that is still running but has passed its expiry also
+// answers from the lease state.
+func TestSandboxOpReplayPastLeaseExpiryAnswersLeaseState(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	issued := sandboxT0.Add(10*time.Minute - 10*time.Second)
+	f.clock.set(issued)
+	start := f.op(t, sandbox.OpExecStart, 1, issued, nil)
+	if first, err := f.ops.AdmitOp(ctx, start); err != nil || !first.Start {
+		t.Fatalf("first admission %+v %v", first, err)
+	}
+	f.clock.set(sandboxT0.Add(10 * time.Minute))
+	replay, err := f.ops.AdmitOp(ctx, start)
+	if err != nil || replay.Start || replay.Unavailable == nil || replay.Unavailable.Status != "running" ||
+		!replay.Unavailable.ExpiresAt.Equal(sandboxT0.Add(10*time.Minute)) {
+		t.Fatalf("replay at lease expiry %+v %v", replay, err)
+	}
+}
+
+// On an agent that runs ops a renewal is decided inside its own transaction
+// on the ops high-water clock, the clock exec lookups decide on: an applied
+// renewal reports that decision time, and once a decision has reached the
+// lease expiry a renewal is not applied, even with the wall clock stepped
+// back before that expiry. The lease lane's own Renew still decides at the
+// time its caller passes (ops off).
+func TestSandboxRenewalDecidesOnTheOpsHighWaterClock(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	leaseID := protocol.SandboxLeaseIDV1(f.lease)
+	expiry := sandboxT0.Add(10 * time.Minute)
+	decided := expiry.Add(-time.Second)
+	f.clock.set(decided)
+	renewed := expiry.Add(5 * time.Minute)
+	outcome, err := f.ops.RenewLease(ctx, f.parties.renewal(t, f.lease, 1, decided, renewed))
+	wantStage(t, outcome, err, sandbox.StageReady, "")
+	if outcome.RenewalSeq != 1 || !outcome.ObservedAt.Equal(decided) {
+		t.Fatalf("renewal before expiry: seq %d observed %v, want 1 at %v", outcome.RenewalSeq, outcome.ObservedAt, decided)
+	}
+	// A decision past the renewed expiry raises the high-water time.
+	past := renewed.Add(time.Second)
+	f.clock.set(past)
+	if decision, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpFileStat, 1, past, nil)); err != nil || decision.Unavailable == nil {
+		t.Fatalf("decision past the renewed expiry %+v %v", decision, err)
+	}
+	stepped := renewed.Add(-10 * time.Second)
+	f.clock.set(stepped)
+	late := f.parties.renewal(t, f.lease, 2, stepped, renewed.Add(5*time.Minute))
+	outcome, err = f.ops.RenewLease(ctx, late)
+	wantStage(t, outcome, err, sandbox.StageExpired, "")
+	if outcome.RenewalSeq != 1 || outcome.ObservedAt.Before(past) {
+		t.Fatalf("renewal after a backward step: seq %d observed %v, want 1 at or after %v", outcome.RenewalSeq, outcome.ObservedAt, past)
+	}
+	if record, _, err := f.leases.Lease(ctx, leaseID); err != nil || !record.LeaseExpiresAt.Equal(renewed) || record.RenewalSeq != 1 {
+		t.Fatalf("lease after a late renewal %+v %v", record, err)
+	}
+	outcome, err = f.leases.Renew(ctx, late, stepped)
+	wantStage(t, outcome, err, sandbox.StageReady, "")
+	if outcome.RenewalSeq != 2 {
+		t.Fatalf("lease lane renewal at its caller's time: seq %d", outcome.RenewalSeq)
+	}
+}
+
+// The end of an admitted exec is recorded only while the exec is still
+// admitted: a start that recorded it running first keeps it running, and the
+// refusal writes nothing. An unknown exec and a state other than cancelled or
+// timed_out are errors.
+func TestSandboxAdmittedExecEndAppliesOnlyWhileAdmitted(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	first := f.op(t, sandbox.OpExecStart, 1, at, nil)
+	if decision, err := f.ops.AdmitOp(ctx, first); err != nil || !decision.Start {
+		t.Fatalf("first admission %+v %v", decision, err)
+	}
+	firstID := protocol.SandboxOpIDV1(first)
+	if err := f.ops.RecordExecState(ctx, firstID, sandbox.ExecStateRunning, nil); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := f.ops.RecordAdmittedExecEnd(ctx, firstID, sandbox.ExecStateCancelled); err != nil || applied {
+		t.Fatalf("end of a running exec applied=%v err=%v, want refused without a write", applied, err)
+	}
+	if lookup, _, err := f.ops.ExecState(ctx, firstID); err != nil || lookup.State != sandbox.ExecStateRunning {
+		t.Fatalf("running exec after the refused end: %+v %v", lookup, err)
+	}
+	second := f.op(t, sandbox.OpExecStart, 2, at, nil)
+	if decision, err := f.ops.AdmitOp(ctx, second); err != nil || !decision.Start {
+		t.Fatalf("second admission %+v %v", decision, err)
+	}
+	secondID := protocol.SandboxOpIDV1(second)
+	if applied, err := f.ops.RecordAdmittedExecEnd(ctx, secondID, sandbox.ExecStateTimedOut); err != nil || !applied {
+		t.Fatalf("end of an admitted exec applied=%v err=%v", applied, err)
+	}
+	if applied, err := f.ops.RecordAdmittedExecEnd(ctx, secondID, sandbox.ExecStateCancelled); err != nil || applied {
+		t.Fatalf("second end of the same exec applied=%v err=%v", applied, err)
+	}
+	if lookup, _, err := f.ops.ExecState(ctx, secondID); err != nil || lookup.State != sandbox.ExecStateTimedOut {
+		t.Fatalf("ended exec %+v %v, want timed_out", lookup, err)
+	}
+	if _, err := f.ops.RecordAdmittedExecEnd(ctx, secondID, sandbox.ExecStateFailed); err == nil {
+		t.Fatal("a failed end was accepted by the admitted-only record")
+	}
+	if _, err := f.ops.RecordAdmittedExecEnd(ctx, leaseIDOf(f)+"-op-"+nonce(99), sandbox.ExecStateCancelled); err == nil {
+		t.Fatal("an unknown exec was accepted")
+	}
+}
+
+func leaseIDOf(f *opsFixture) string { return protocol.SandboxLeaseIDV1(f.lease) }
+
+// A lease_status records no op, counts toward no bound and leaves the lease
+// and every exec as they are.
+func TestLeaseStatusReadsAndWritesNothingButTheClock(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	start := f.op(t, sandbox.OpExecStart, 1, at, nil)
+	if _, err := f.ops.AdmitOp(ctx, start); err != nil {
+		t.Fatal(err)
+	}
+	opsBefore, execsBefore := opRows(t, f.store)
+	expiry := func() (expires int64, status string) {
+		t.Helper()
+		if err := f.store.db.QueryRowContext(ctx, `SELECT lease_expires_at_ns,status FROM sandbox_leases WHERE lease_id=?`, leaseIDOf(f)).Scan(&expires, &status); err != nil {
+			t.Fatal(err)
+		}
+		return expires, status
+	}
+	expiresBefore, statusBefore := expiry()
+	execState := func() (state string, updated int64) {
+		t.Helper()
+		if err := f.store.db.QueryRowContext(ctx, `SELECT state,updated_at_ns FROM sandbox_execs WHERE exec_id=?`, protocol.SandboxOpIDV1(start)).Scan(&state, &updated); err != nil {
+			t.Fatal(err)
+		}
+		return state, updated
+	}
+	stateBefore, updatedBefore := execState()
+	for i := range 3 {
+		status, err := f.ops.LeaseStatus(ctx, f.op(t, sandbox.OpLeaseStatus, 50+i, at, nil))
+		if err != nil || status.Unavailable != nil || status.DecidedAt.IsZero() {
+			t.Fatalf("lease status: %+v %v", status, err)
+		}
+	}
+	if ops, execs := opRows(t, f.store); ops != opsBefore || execs != execsBefore {
+		t.Fatalf("rows moved: ops %d->%d execs %d->%d", opsBefore, ops, execsBefore, execs)
+	}
+	if expires, status := expiry(); expires != expiresBefore || status != statusBefore {
+		t.Fatalf("lease moved: %d %s", expires, status)
+	}
+	if state, updated := execState(); state != stateBefore || updated != updatedBefore {
+		t.Fatalf("exec moved: %s %d", state, updated)
+	}
+	// The op table's constraint still refuses it, so it can never be admitted
+	// as an op by accident.
+	if _, err := f.ops.AdmitOp(ctx, f.op(t, sandbox.OpLeaseStatus, 60, at, nil)); err == nil {
+		t.Fatal("AdmitOp recorded a lease_status")
+	}
+}
+
+func TestLeaseStatusIsFencedAndHonoursTheWindow(t *testing.T) {
+	f := newOpsFixture(t)
+	ctx := context.Background()
+	at := f.clock.read()
+	if _, err := f.ops.LeaseStatus(ctx, f.op(t, sandbox.OpFileStat, 1, at, nil)); err == nil {
+		t.Fatal("LeaseStatus answered another op")
+	}
+	late := f.op(t, sandbox.OpLeaseStatus, 2, at, nil)
+	f.clock.set(at.Add(time.Minute))
+	if _, err := f.ops.LeaseStatus(ctx, late); !errors.Is(err, ErrSandboxOpExpired) {
+		t.Fatalf("expired window: %v", err)
+	}
+	foreign := f.op(t, sandbox.OpLeaseStatus, 3, f.clock.read(), func(r *protocol.SandboxOpRequestV1) {
+		r.LeaseDigest = "sha256:" + strings.Repeat("0", 64)
+	})
+	if _, err := f.ops.LeaseStatus(ctx, foreign); !errors.Is(err, ErrSandboxOpForeign) {
+		t.Fatalf("foreign lease: %v", err)
+	}
+	f.clock.set(sandboxTime(f.lease.LeaseExpiresAt).Add(time.Second))
+	status, err := f.ops.LeaseStatus(ctx, f.op(t, sandbox.OpLeaseStatus, 4, f.clock.read(), nil))
+	if err != nil || status.Unavailable == nil || status.Unavailable.RefusalCode(status.DecidedAt) != "lease_expired" {
+		t.Fatalf("expired lease: %+v %v", status, err)
+	}
+}

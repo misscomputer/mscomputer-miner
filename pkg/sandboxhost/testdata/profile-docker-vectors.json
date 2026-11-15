@@ -1,0 +1,21 @@
+{
+  "comment": "The egress profile of profile-vectors.json plus the optional docker member. Shared by pkg/sandboxhost and tests/python/test_sandbox_host_report.py.",
+  "docker": {
+    "args": ["--systemd-cgroup", "--overlay2=none", "--net-raw", "--allow-packet-socket-write"],
+    "runtime": "runsc-docker",
+    "volume_tmpfs_mib": 4096
+  },
+  "docker_digest": "sha256:d3622a9f383569c521b8f0c79a74d3303478520ea3d166b9da995c9b5325607a",
+  "invalid_docker": [
+    {"name": "base runtime name", "path": ["docker", "runtime"], "value": "runsc"},
+    {"name": "runc", "path": ["docker", "runtime"], "value": "runc"},
+    {"name": "missing packet write", "path": ["docker", "args"], "value": ["--systemd-cgroup", "--overlay2=none", "--net-raw"]},
+    {"name": "reordered args", "path": ["docker", "args"], "value": ["--overlay2=none", "--systemd-cgroup", "--net-raw", "--allow-packet-socket-write"]},
+    {"name": "extra host network", "path": ["docker", "args"], "value": ["--systemd-cgroup", "--overlay2=none", "--net-raw", "--allow-packet-socket-write", "--network=host"]},
+    {"name": "tmpfs too small", "path": ["docker", "volume_tmpfs_mib"], "value": 0},
+    {"name": "tmpfs too large", "path": ["docker", "volume_tmpfs_mib"], "value": 65537},
+    {"name": "tmpfs fraction", "path": ["docker", "volume_tmpfs_mib"], "value": 1024.5},
+    {"name": "unknown member", "path": ["docker", "privileged"], "value": true},
+    {"name": "not an object", "path": ["docker"], "value": "runsc-docker"}
+  ]
+}

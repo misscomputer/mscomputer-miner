@@ -1,0 +1,334 @@
+{
+  "comment": "Shared by pkg/sandboxhost (Go) and scripts/sandbox-host/report.py (Python) tests: both must accept valid with this digest and reject every mutation.",
+  "valid": {
+    "schema": "ms.computer/mscomputer-subnet/sandbox-host-profile",
+    "schema_version": 1,
+    "docker_host": "unix:///run/mcsbx/run/docker/docker.sock",
+    "containerd": {
+      "address": "/run/mcsbx/run/containerd/containerd.sock",
+      "namespace": "mc-sandbox",
+      "plugins_namespace": "mc-sandbox-plugins"
+    },
+    "data_root": "/run/mcsbx/data",
+    "docker_data_root": "/run/mcsbx/data/docker",
+    "run_root": "/run/mcsbx/run",
+    "runtime": {
+      "name": "runsc",
+      "path": "/run/mcsbx/bin/runsc",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sentry_path": "/run/mcsbx/bin/gvisor-bin/gvisor_sentry",
+      "sentry_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "args": [
+        "--systemd-cgroup",
+        "--overlay2=none"
+      ],
+      "release": "release-20261005.0"
+    },
+    "engine": {
+      "docker_version": "28.0.4",
+      "egress_table": "mcsbx_engine_egress"
+    },
+    "cgroup_root": "/sys/fs/cgroup",
+    "lease_slice": "mcsbxlease.slice",
+    "engine_slice": "mcsbxengine.slice",
+    "aggregate": {
+      "cpu_millis": 2000,
+      "memory_mib": 1024,
+      "pids": 1024,
+      "data_fs_mib": 4096,
+      "run_tmpfs_mib": 64,
+      "image_reserve_mib": 512,
+      "engine_overhead_mib": 512,
+      "image_max_mib": 256,
+      "log_mib": 16,
+      "disk_mib": 1984,
+      "sandboxes": 4
+    },
+    "per_lease": {
+      "default_writable_mib": 64,
+      "log_max_size_mib": 8,
+      "log_max_file": 2,
+      "pids_max": 64,
+      "mounts": "none",
+      "image_volumes": "refuse",
+      "network_modes": [
+        "none"
+      ],
+      "isolation": [
+        "gvisor"
+      ]
+    }
+  },
+  "valid_digest": "sha256:1a976e51b68386b88f779a6cb5800236b88bee1d31f6448f8ce54cdfcbd63127",
+  "invalid": [
+    {
+      "name": "default docker socket",
+      "path": [
+        "docker_host"
+      ],
+      "value": "unix:///var/run/docker.sock"
+    },
+    {
+      "name": "shared containerd namespace",
+      "path": [
+        "containerd",
+        "namespace"
+      ],
+      "value": "moby"
+    },
+    {
+      "name": "runsc without overlay2=none",
+      "path": [
+        "runtime",
+        "args"
+      ],
+      "value": [
+        "--systemd-cgroup"
+      ]
+    },
+    {
+      "name": "D7 disk overcommit",
+      "path": [
+        "aggregate",
+        "disk_mib"
+      ],
+      "value": 1985
+    },
+    {
+      "name": "log_mib not max-size x max-file",
+      "path": [
+        "aggregate",
+        "log_mib"
+      ],
+      "value": 8
+    },
+    {
+      "name": "pids do not cover sandboxes x pids_max",
+      "path": [
+        "per_lease",
+        "pids_max"
+      ],
+      "value": 512
+    },
+    {
+      "name": "pids cover sandboxes x pids_max but not the gVisor host pids",
+      "path": [
+        "per_lease",
+        "pids_max"
+      ],
+      "value": 200
+    },
+    {
+      "name": "public egress",
+      "path": [
+        "per_lease",
+        "network_modes"
+      ],
+      "value": [
+        "none",
+        "public"
+      ]
+    },
+    {
+      "name": "hyphenated slice",
+      "path": [
+        "lease_slice"
+      ],
+      "value": "mc-sandbox.slice"
+    },
+    {
+      "name": "unclean data root",
+      "path": [
+        "data_root"
+      ],
+      "value": "/run/mcsbx/data/"
+    },
+    {
+      "name": "non-integer size",
+      "path": [
+        "aggregate",
+        "sandboxes"
+      ],
+      "value": 4.5
+    },
+    {
+      "name": "unknown member",
+      "path": [
+        "engine",
+        "extra"
+      ],
+      "value": 1
+    },
+    {
+      "name": "no egress table",
+      "path": [
+        "engine",
+        "egress_table"
+      ],
+      "value": ""
+    },
+    {
+      "name": "public network without egress",
+      "path": [
+        "per_lease",
+        "network_modes"
+      ],
+      "value": [
+        "none",
+        "public"
+      ]
+    }
+  ],
+  "egress": {
+    "bridge": "mcsbxeg0",
+    "subnet": "10.231.0.0/24",
+    "dns": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "bandwidth_mbit": 50,
+    "new_conns_per_second": 50,
+    "deny_cidrs": [
+      "203.0.112.0/24"
+    ]
+  },
+  "egress_digest": "sha256:e27fa276ae3d1f0317ee6b65312617e3c173681b1a1c29d83cb8dee4b72251cc",
+  "invalid_egress": [
+    {
+      "name": "egress without public network",
+      "path": [
+        "per_lease",
+        "network_modes"
+      ],
+      "value": [
+        "none"
+      ]
+    },
+    {
+      "name": "egress bridge docker0",
+      "path": [
+        "egress",
+        "bridge"
+      ],
+      "value": "docker0"
+    },
+    {
+      "name": "egress bridge name invalid",
+      "path": [
+        "egress",
+        "bridge"
+      ],
+      "value": "Mcsbx-eg0"
+    },
+    {
+      "name": "egress subnet public",
+      "path": [
+        "egress",
+        "subnet"
+      ],
+      "value": "8.8.8.0/24"
+    },
+    {
+      "name": "egress subnet not canonical",
+      "path": [
+        "egress",
+        "subnet"
+      ],
+      "value": "10.231.0.1/24"
+    },
+    {
+      "name": "egress subnet too large",
+      "path": [
+        "egress",
+        "subnet"
+      ],
+      "value": "10.0.0.0/8"
+    },
+    {
+      "name": "egress subnet ipv6",
+      "path": [
+        "egress",
+        "subnet"
+      ],
+      "value": "fd00::/64"
+    },
+    {
+      "name": "egress dns private",
+      "path": [
+        "egress",
+        "dns"
+      ],
+      "value": [
+        "10.0.0.53"
+      ]
+    },
+    {
+      "name": "egress dns metadata",
+      "path": [
+        "egress",
+        "dns"
+      ],
+      "value": [
+        "169.254.169.254"
+      ]
+    },
+    {
+      "name": "egress dns empty",
+      "path": [
+        "egress",
+        "dns"
+      ],
+      "value": []
+    },
+    {
+      "name": "egress bandwidth zero",
+      "path": [
+        "egress",
+        "bandwidth_mbit"
+      ],
+      "value": 0
+    },
+    {
+      "name": "egress conns zero",
+      "path": [
+        "egress",
+        "new_conns_per_second"
+      ],
+      "value": 0
+    },
+    {
+      "name": "egress conns too high",
+      "path": [
+        "egress",
+        "new_conns_per_second"
+      ],
+      "value": 10001
+    },
+    {
+      "name": "egress deny not canonical",
+      "path": [
+        "egress",
+        "deny_cidrs"
+      ],
+      "value": [
+        "203.0.113.7/24"
+      ]
+    },
+    {
+      "name": "egress deny null",
+      "path": [
+        "egress",
+        "deny_cidrs"
+      ],
+      "value": null
+    },
+    {
+      "name": "egress unknown member",
+      "path": [
+        "egress",
+        "allow_smtp"
+      ],
+      "value": true
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "miner_test_seed": "2222222222222222222222222222222222222222222222222222222222222222",
+  "miner_service_public_key": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+  "reservation": {
+    "generation": 1,
+    "hold_expires_at": "2026-10-13T12:01:00Z",
+    "issued_at": "2026-10-13T12:00:00Z",
+    "miner_id": "5Fminer",
+    "reservation_nonce": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "resources": {
+      "cpu_millis": 1000,
+      "disk_mib": 10240,
+      "memory_mib": 4096,
+      "pids": 512
+    },
+    "sandbox_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "schema": "ms.computer/mscomputer-subnet/sandbox-reservation-ticket",
+    "schema_version": 1,
+    "signature": "360cf04789015426af9b3dc7af8fd64f21c6628131269f1edee8fd956b3a8f6c758ee2c01d6e3c6a5f9066805dad17bf715239c554e9833fa7a66a5c0233e003",
+    "subnet": {
+      "chain_block": 100,
+      "epoch": 10,
+      "expires_at_block": 125,
+      "miner_axon_url": "https://8.8.8.8:8091",
+      "miner_hotkey": "5Fminer",
+      "miner_service_public_key": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+      "miner_tls_certificate_sha256": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+      "miner_transport": "https",
+      "miner_uid": 7,
+      "netuid": 24,
+      "network": "test",
+      "validator_hotkey": "5Hvalidator",
+      "validator_service_public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    },
+    "workload_kind": "sandbox"
+  },
+  "reservation_digest": "sha256:e5c9040ff4e3b1a02ef1126bc61c446ab9962c42d4ab8ceed1726c2cf340739e",
+  "lease": {
+    "assignment_nonce": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "env": {},
+    "generation": 1,
+    "image_digest": "sha256:c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+    "image_reference": "docker.io/swebench/sweb.eval.x86_64.django_1776_django-12345@sha256:c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+    "isolation": "gvisor",
+    "issued_at": "2026-10-13T12:00:10Z",
+    "lease_expires_at": "2026-10-13T12:10:00Z",
+    "miner_id": "5Fminer",
+    "network": {
+      "allow": [],
+      "mode": "public"
+    },
+    "reservation_digest": "sha256:e5c9040ff4e3b1a02ef1126bc61c446ab9962c42d4ab8ceed1726c2cf340739e",
+    "resources": {
+      "cpu_millis": 1000,
+      "disk_mib": 10240,
+      "memory_mib": 4096,
+      "pids": 512
+    },
+    "sandbox_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "schema": "ms.computer/mscomputer-subnet/sandbox-lease-ticket",
+    "schema_version": 1,
+    "secret_env": {
+      "bundle_digest": null,
+      "delivery": "none",
+      "names": []
+    },
+    "signature": "ba752f45a6e532c0b8ebeea919a9ffd8ce8e1c5b5103753481698b4aa5925944b61e135e800bca1e2cbe66407612c96cfddd8f40320f8e89eb642b320dbb630f",
+    "subnet": {
+      "chain_block": 100,
+      "epoch": 10,
+      "expires_at_block": 125,
+      "miner_axon_url": "https://8.8.8.8:8091",
+      "miner_hotkey": "5Fminer",
+      "miner_service_public_key": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+      "miner_tls_certificate_sha256": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+      "miner_transport": "https",
+      "miner_uid": 7,
+      "netuid": 24,
+      "network": "test",
+      "validator_hotkey": "5Hvalidator",
+      "validator_service_public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    },
+    "workload_kind": "sandbox"
+  },
+  "lease_digest": "sha256:37f6d846d606950933972a04d9ffdc145e19b3ebbc1623c62f3959006752de52",
+  "lease_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f-5Fminer-g1-b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "renewal": {
+    "generation": 1,
+    "issued_at": "2026-10-13T12:10:00Z",
+    "lease_digest": "sha256:37f6d846d606950933972a04d9ffdc145e19b3ebbc1623c62f3959006752de52",
+    "lease_expires_at": "2026-10-13T12:20:00Z",
+    "lease_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f-5Fminer-g1-b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "miner_id": "5Fminer",
+    "renewal_seq": 1,
+    "sandbox_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "schema": "ms.computer/mscomputer-subnet/sandbox-lease-renewal",
+    "schema_version": 1,
+    "signature": "52a77a8daf69473ba2b8667fd6e280973e8b1b8885a2ebe9788fd5505cefdf248c431d4a9a299960c28dddecf884b957ce77bd98511eec4b4d295b660b7dfd05",
+    "subnet": {
+      "chain_block": 100,
+      "epoch": 10,
+      "expires_at_block": 125,
+      "miner_axon_url": "https://8.8.8.8:8091",
+      "miner_hotkey": "5Fminer",
+      "miner_service_public_key": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+      "miner_tls_certificate_sha256": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+      "miner_transport": "https",
+      "miner_uid": 7,
+      "netuid": 24,
+      "network": "test",
+      "validator_hotkey": "5Hvalidator",
+      "validator_service_public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    }
+  },
+  "release": {
+    "generation": 1,
+    "issued_at": "2026-10-13T12:01:00Z",
+    "miner_id": "5Fminer",
+    "reason": "customer_delete",
+    "sandbox_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "schema": "ms.computer/mscomputer-subnet/sandbox-lease-release",
+    "schema_version": 1,
+    "signature": "a34d1fff24f47aa8c92cbca62e8102cbf1adc1a170ab76f196b9092ecefdc7a24b34a447a0c18c02ee510424e9bf8d3f748782c195437c18cefaffb3e276e000",
+    "subnet": {
+      "chain_block": 100,
+      "epoch": 10,
+      "expires_at_block": 125,
+      "miner_axon_url": "https://8.8.8.8:8091",
+      "miner_hotkey": "5Fminer",
+      "miner_service_public_key": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+      "miner_tls_certificate_sha256": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+      "miner_transport": "https",
+      "miner_uid": 7,
+      "netuid": 24,
+      "network": "test",
+      "validator_hotkey": "5Hvalidator",
+      "validator_service_public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    }
+  },
+  "receipt": {
+    "capacity_active": {
+      "cpu_millis": 0,
+      "disk_mib": 0,
+      "memory_mib": 0,
+      "sandboxes": 0
+    },
+    "capacity_held": {
+      "cpu_millis": 1000,
+      "disk_mib": 10240,
+      "memory_mib": 4096,
+      "sandboxes": 1
+    },
+    "capacity_total": {
+      "cpu_millis": 8000,
+      "disk_mib": 204800,
+      "memory_mib": 32768,
+      "sandboxes": 8
+    },
+    "document_digest": "sha256:37f6d846d606950933972a04d9ffdc145e19b3ebbc1623c62f3959006752de52",
+    "document_schema": "ms.computer/mscomputer-subnet/sandbox-lease-ticket",
+    "error_code": null,
+    "generation": 1,
+    "lease_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f-5Fminer-g1-b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "miner_id": "5Fminer",
+    "observed_at": "2026-10-13T12:00:01Z",
+    "renewal_seq": 0,
+    "sandbox_id": "sbx-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "schema": "ms.computer/mscomputer-subnet/sandbox-lease-receipt",
+    "schema_version": 1,
+    "signature": "dbe42bc886e69019b24f85b965bb66989e8ffbceb3e28bf2128917be246f5fd98f820f82925657ad9f656f4840ff069078153d8a899a0cd381375e37779b1e06",
+    "stage": "ready",
+    "subnet": {
+      "chain_block": 100,
+      "epoch": 10,
+      "expires_at_block": 125,
+      "miner_axon_url": "https://8.8.8.8:8091",
+      "miner_hotkey": "5Fminer",
+      "miner_service_public_key": "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+      "miner_tls_certificate_sha256": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+      "miner_transport": "https",
+      "miner_uid": 7,
+      "netuid": 24,
+      "network": "test",
+      "validator_hotkey": "5Hvalidator",
+      "validator_service_public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+    }
+  },
+  "validator_test_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+  "validator_service_public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+}

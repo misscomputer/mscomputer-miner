@@ -1,0 +1,47 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # upload release assets
+      id-token: write      # Sigstore keyless signing / attestations (no stored secrets)
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with: { go-version: "1.23.12", cache: false }  # the installer's pinned toolchain
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with: { python-version: "3.12" }
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+      - name: Reproducible build
+        env: { CGO_ENABLED: "0", GOOS: linux, GOARCH: amd64, GOFLAGS: -mod=readonly }
+        run: |
+          mkdir dist
+          for c in miner-agent sandbox-host-observe; do
+            go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o dist/$c-linux-amd64 ./cmd/$c
+          done
+          sh scripts/sandbox-ops-helper/build.sh dist/sandbox-ops-helper-linux-amd64
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python -m pip wheel --no-deps -w dist .
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Installer pin matches this release
+        run: |
+          # install.sh in the tagged tree must pin this tag and the digest of
+          # the agent built above (the same recipe the installer uses).
+          inst=scripts/miner-install/install.sh
+          ref=$(sed -n 's/^readonly PINNED_REF=//p' "$inst")
+          want=$(sed -n 's/^readonly PINNED_AGENT_SHA256=//p' "$inst")
+          got=$(sha256sum dist/miner-agent-linux-amd64 | cut -d' ' -f1)
+          test "$ref" = "$GITHUB_REF_NAME" || { echo "install.sh pins $ref, not $GITHUB_REF_NAME"; exit 1; }
+          test "$want" = "$got" || { echo "install.sh pins agent $want, release built $got"; exit 1; }
+      - name: Sign (keyless)
+        run: |
+          for f in dist/*; do cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"; done
+      - uses: actions/attest-build-provenance@7668571508540a607bdfd90a87a560489fe372eb # v2.1.0
+        with: { subject-path: "dist/*" }
+      - env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes "Release $GITHUB_REF_NAME"

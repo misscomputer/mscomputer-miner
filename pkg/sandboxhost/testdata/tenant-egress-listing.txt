@@ -1,0 +1,64 @@
+table inet mcsbx_sandbox_egress {
+	set new_conns {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 1m
+	}
+
+	set up_bytes {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 1m
+	}
+
+	set down_bytes {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 1m
+	}
+
+	set allow_dsts {
+		type ether_addr . ipv4_addr
+		flags interval
+	}
+
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		iifname "mcsbxeg0" ct state established,related accept
+		iifname "mcsbxeg0" counter packets 0 bytes 0 reject with icmpx admin-prohibited
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		oifname "mcsbxeg0" iifname != "mcsbxeg0" ct state established,related update @down_bytes { ip daddr limit rate over 6250 kbytes/second burst 6250 kbytes } counter packets 0 bytes 0 drop
+		oifname "mcsbxeg0" iifname != "mcsbxeg0" ct state established,related accept
+		oifname "mcsbxeg0" counter packets 0 bytes 0 drop
+		iifname "mcsbxeg0" jump egress
+	}
+
+	chain egress {
+		meta nfproto ipv6 counter packets 0 bytes 0 drop
+		ip saddr != 10.231.0.0/24 counter packets 0 bytes 0 drop
+		ether saddr 06:6d:73:00:00:00-06:6d:73:ff:ff:ff ether saddr . ip daddr != @allow_dsts counter packets 0 bytes 0 reject with icmpx admin-prohibited
+		fib daddr type local counter packets 0 bytes 0 reject with icmpx admin-prohibited
+		ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3 } counter packets 0 bytes 0 reject with icmpx admin-prohibited
+		tcp dport { 25, 465, 587 } counter packets 0 bytes 0 reject with tcp reset
+		ct state new add @new_conns { ip saddr limit rate over 50/second burst 100 packets } counter packets 0 bytes 0 drop
+		update @up_bytes { ip saddr limit rate over 6250 kbytes/second burst 6250 kbytes } counter packets 0 bytes 0 drop
+		accept
+	}
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		ip saddr 10.231.0.0/24 oifname != "mcsbxeg0" masquerade
+	}
+}
+table bridge mcsbx_sandbox_isolation {
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		meta ibrname "mcsbxeg0" counter packets 0 bytes 0 drop
+	}
+}

@@ -1,0 +1,43 @@
+Ms. Computer SN24 Miner License
+
+Copyright (c) 2026 Ms. Computer. All rights reserved.
+
+This repository (the "Software") is proprietary software owned by Ms. Computer.
+It is published so that miners can inspect, build, and verify what they run.
+Publication does not place the Software under an open-source license.
+
+1. Permitted use. Subject to these terms, Ms. Computer grants you a limited,
+   revocable, non-exclusive, non-transferable, non-sublicensable permission to:
+   (a) view and read the Software;
+   (b) build the Software from source without modification, and download the
+       official releases; and
+   (c) run the Software, unmodified, solely to operate a miner on the Ms.
+       Computer subnet (netuid 24) of the Bittensor network.
+
+2. Restrictions. Except as expressly permitted in section 1 (including the
+   copies reasonably necessary to download, build, and run the Software as
+   permitted there), you may not, in whole or in part: copy, modify, adapt, translate, or create derivative works
+   of the Software; redistribute, publish, sell, lease, sublicense, or otherwise
+   make the Software available to any third party; use the Software, or any
+   part of it, for any purpose other than mining on the Ms. Computer subnet; or
+   remove or alter this notice. Forks or copies created by a hosting platform
+   under its own terms of service grant no rights beyond this License.
+
+3. Contributions. Ms. Computer does not accept unsolicited code
+   contributions. If you submit a suggestion or patch, you grant Ms. Computer a
+   perpetual, irrevocable, worldwide, royalty-free right to use it for any
+   purpose.
+
+4. Third-party components. Files or dependencies identified in
+   THIRD_PARTY_NOTICES.md or carrying their own license notice remain under
+   their own licenses; this License does not apply to them.
+
+5. Termination. Your permission ends automatically if you breach these terms.
+   On termination you must stop using and delete all copies of the Software.
+
+6. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR
+   PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL MS. COMPUTER BE LIABLE FOR
+   ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+SPDX identifier for files in this repository: LicenseRef-MsComputer-Miner
