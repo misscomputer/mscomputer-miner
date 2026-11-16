@@ -807,6 +807,10 @@ func (b *GVisor) Create(ctx context.Context, instanceID string, lease protocol.S
 	if err == nil && allowlisted(lease.Network.Mode) {
 		err = b.verifyAllowlistMAC(ctx, instanceID)
 	}
+	if err == nil && allowlisted(lease.Network.Mode) {
+		// Reported running only once its rules are verified in place.
+		err = b.verifyAllowlistActive(ctx, instanceID, lease)
+	}
 	return err
 }
 

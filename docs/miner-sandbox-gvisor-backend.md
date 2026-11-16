@@ -254,7 +254,16 @@ the same check before deployment.
   and every refusal of `public` still applies. The agent rebuilds the set on
   every egress check, so hostnames re-resolve each sweep; a failed rebuild
   makes the host unhealthy. A started sandbox whose interface lacks its MAC
-  is removed (`egress_firewall_unavailable`). Matching is by address, so a
+  is removed (`egress_firewall_unavailable`). Sandboxes now report ready
+  only after network rules are active: before the create returns, the agent
+  reads the kernel's `allow_dsts` set and the egress tables, and requires
+  the sandbox's MAC paired with every CIDR of its allowlist and every
+  resolver, in the tables it loaded (addresses resolved from hostnames are
+  not checked: a name may resolve to nothing). A miss (for example a table
+  reload that emptied the set) is refilled and checked again for about
+  10 s; then the sandbox is removed and the create fails as
+  `egress_firewall_unavailable`. This checks the rules once, at create;
+  later reloads are refilled by the agent's sweep as before. Matching is by address, so a
   host sharing an address (a CDN) admits its neighbours; a name with no IPv4
   answer admits nothing. `allowlist` with capability `docker` is refused
   (`network_policy_unsupported`). Miners advertise `sandbox-allowlist-v1`.

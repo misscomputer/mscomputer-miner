@@ -10,7 +10,9 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/misscomputer/mscomputer-miner/pkg/miner"
 	"github.com/misscomputer/mscomputer-miner/pkg/protocol"
 	"github.com/misscomputer/mscomputer-miner/pkg/sandbox"
 	"github.com/misscomputer/mscomputer-miner/pkg/sandboxhost"
@@ -28,12 +30,40 @@ type allowHost struct {
 	wrongMAC  string
 	// containersAtLoad counts the engine's containers at each load.
 	containersAtLoad []int
+	// missingReads is how many reads of the kernel's set return it empty
+	// (a reload raced the create); reads counts every read.
+	missingReads, reads int
 }
 
 func newAllowHost(t *testing.T) *allowHost {
 	h := &allowHost{egressHost: newEgressHost(t), resolves: map[string][]netip.Addr{}}
-	apply, resolve := applyTenantAllowlists, resolveAllowHost
-	t.Cleanup(func() { applyTenantAllowlists, resolveAllowHost = apply, resolve })
+	apply, resolve, read := applyTenantAllowlists, resolveAllowHost, loadedTenantAllowlistPairs
+	wait, poll := allowlistVerifyWait, allowlistVerifyPoll
+	t.Cleanup(func() {
+		applyTenantAllowlists, resolveAllowHost, loadedTenantAllowlistPairs = apply, resolve, read
+		allowlistVerifyWait, allowlistVerifyPoll = wait, poll
+	})
+	allowlistVerifyWait, allowlistVerifyPoll = 300*time.Millisecond, 10*time.Millisecond
+	// The kernel's set holds the last load, each list with the resolvers.
+	loadedTenantAllowlistPairs = func() (map[string][]netip.Prefix, map[string]bool, error) {
+		h.reads++
+		pairs := map[string][]netip.Prefix{}
+		if h.missingReads > 0 {
+			h.missingReads--
+			return pairs, nil, nil
+		}
+		if len(h.loads) == 0 {
+			return pairs, nil, nil
+		}
+		for _, list := range h.loads[len(h.loads)-1] {
+			dests := append([]netip.Prefix(nil), list.Destinations...)
+			for _, server := range h.config.Egress.DNS {
+				dests = append(dests, netip.PrefixFrom(netip.MustParseAddr(server), 32))
+			}
+			pairs[list.MAC] = sandboxhost.CollapsePrefixes(dests)
+		}
+		return pairs, nil, nil
+	}
 	applyTenantAllowlists = func(e sandboxhost.ProfileEgress, lists []sandboxhost.TenantAllowlist) error {
 		if _, err := e.TenantAllowlistScript(lists); err != nil {
 			t.Fatalf("invalid allowlists %v: %v", lists, err)
@@ -271,5 +301,99 @@ func TestAllowlistListedMACCollisionAdmitsNothing(t *testing.T) {
 	}
 	if got, want := lastLoad(h), fmt.Sprintf("[{%s []}]", allowlistMAC(protocol.SandboxLeaseIDV1(first))); got != want {
 		t.Fatalf("allowlists with a shared MAC %s, want %s", got, want)
+	}
+}
+
+// A started allowlist sandbox is reported running only once the kernel's
+// set pairs its address with its allowlist and the resolvers: a set found
+// empty (a reload raced the create) is refilled and checked again; one that
+// stays wrong past the bound fails the create as a miner fault, the
+// sandbox removed.
+func TestCreateAllowlistVerifiesRulesBeforeRunning(t *testing.T) {
+	h := newAllowHost(t)
+	lease := allowLease(7, "140.82.112.0/20")
+	if err := h.backend().Create(context.Background(), instanceOf(lease), lease); err != nil {
+		t.Fatal(err)
+	}
+	if h.reads == 0 {
+		t.Fatal("create did not read the kernel's allowlist set")
+	}
+
+	h = newAllowHost(t)
+	h.missingReads = 2
+	loads := 0
+	if err := h.backend().Create(context.Background(), instanceOf(lease), lease); err != nil {
+		t.Fatalf("create after a raced reload = %v", err)
+	}
+	if loads = len(h.loads); loads < 2 || h.reads != 3 {
+		t.Fatalf("raced reload: %d loads, %d reads (want a refill and a third read)", loads, h.reads)
+	}
+
+	h = newAllowHost(t)
+	h.missingReads = 1 << 30
+	started := time.Now()
+	err := h.backend().Create(context.Background(), instanceOf(lease), lease)
+	if err == nil || refusalCode(err) != "" || !strings.Contains(err.Error(), sandbox.EgressFirewallUnavailable) || !strings.Contains(err.Error(), "not verified") {
+		t.Fatalf("create with rules never in place = %v", err)
+	}
+	if time.Since(started) > 5*time.Second {
+		t.Fatalf("verification took %s, past its bound", time.Since(started))
+	}
+	if _, found := h.engine.containers[instanceOf(lease)]; found {
+		t.Fatal("unverified allowlist sandbox kept running")
+	}
+
+	// A set missing one prefix (or a resolver) is not in place either.
+	h = newAllowHost(t)
+	b := h.backend()
+	mac := allowlistMAC(protocol.SandboxLeaseIDV1(lease))
+	loadedTenantAllowlistPairs = func() (map[string][]netip.Prefix, map[string]bool, error) {
+		return map[string][]netip.Prefix{mac: {netip.MustParsePrefix("140.82.112.0/20")}}, nil, nil
+	}
+	if err := b.Create(context.Background(), instanceOf(lease), lease); err == nil || !strings.Contains(err.Error(), "lacks") {
+		t.Fatalf("create with the resolvers missing from the set = %v", err)
+	}
+
+	// Tables that differ from the loaded ruleset are not in place.
+	h = newAllowHost(t)
+	b = h.backend()
+	calls := 0
+	tenantEgressListing = func(sandboxhost.ProfileEgress) (string, error) {
+		calls++
+		if calls > 1 {
+			return "edited", nil
+		}
+		return h.listing, nil
+	}
+	h.apply = errors.New("nft failed")
+	if err := b.Create(context.Background(), instanceOf(lease), lease); err == nil || !strings.Contains(err.Error(), sandbox.EgressFirewallUnavailable) {
+		t.Fatalf("create with edited tables = %v", err)
+	}
+}
+
+// A hostname-only allowlist is verified by its resolvers (a name may
+// resolve to nothing); a create its caller cancels while the rules are
+// missing fails with the cancellation, not as the miner's fault.
+func TestCreateAllowlistVerifyHostnamesAndCancel(t *testing.T) {
+	h := newAllowHost(t)
+	lease := allowLease(8, "missing.invalid")
+	if err := h.backend().Create(context.Background(), instanceOf(lease), lease); err != nil {
+		t.Fatalf("hostname-only create = %v", err)
+	}
+
+	h = newAllowHost(t)
+	h.missingReads = 1 << 30
+	allowlistVerifyWait = 5 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
+	lease = allowLease(9, "140.82.112.0/20")
+	err := h.backend().Create(ctx, instanceOf(lease), lease)
+	var fault *miner.SandboxFault
+	if err == nil || errors.As(err, &fault) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled create = %v", err)
+	}
+	if _, found := h.engine.containers[instanceOf(lease)]; found {
+		t.Fatal("unverified allowlist sandbox kept running")
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/misscomputer/mscomputer-miner/pkg/miner"
+	"github.com/misscomputer/mscomputer-miner/pkg/protocol"
 	"github.com/misscomputer/mscomputer-miner/pkg/sandbox"
 	"github.com/misscomputer/mscomputer-miner/pkg/sandboxhost"
 )
@@ -32,6 +33,16 @@ const LabelNetworkAllow = "computer.ms.sandbox.network-allow"
 const (
 	allowlistTimeout = 10 * time.Second
 	allowResolveWait = 2 * time.Second
+)
+
+var (
+	// allowlistVerifyWait bounds how long a started allowlist sandbox may
+	// wait for its pairs to be verified in the kernel's set before its
+	// create fails; allowlistVerifyPoll is the pause between checks.
+	allowlistVerifyWait = 10 * time.Second
+	allowlistVerifyPoll = 250 * time.Millisecond
+	// loadedTenantAllowlistPairs reads the allowlist set as the kernel holds it.
+	loadedTenantAllowlistPairs = sandboxhost.LoadedTenantAllowlistPairs
 )
 
 var (
@@ -231,4 +242,99 @@ func (b *GVisor) verifyAllowlistMAC(ctx context.Context, instanceID string) erro
 		err = fmt.Errorf("%w; remove it: %v", err, removeErr)
 	}
 	return fmt.Errorf("%w: %v", &miner.SandboxFault{Code: sandbox.EgressFirewallUnavailable}, err)
+}
+
+// verifyAllowlistActive holds a started allowlist sandbox until its rules
+// are verified in place, so it is never reported running before its
+// allowed egress works: the egress tables are the ones the agent loaded
+// (the static rule confining the allowlist range is there), and the
+// kernel's set pairs the sandbox's interface address with every prefix of
+// its allowlist and every profile resolver. A miss (a reload of the table
+// emptied the set, a rebuild raced the create) is refilled by an egress
+// check and checked again until allowlistVerifyWait has passed (a refill
+// already running may end after it); then the sandbox is removed and the
+// create fails as a miner fault. A create its caller cancels fails with the
+// cancellation instead. Addresses resolved from hostnames are not checked
+// (a name may legitimately resolve to nothing); CIDRs and resolvers are.
+func (b *GVisor) verifyAllowlistActive(ctx context.Context, instanceID string, lease protocol.SandboxLeaseV1) error {
+	if b.config.Egress == nil {
+		return nil
+	}
+	mac := allowlistMAC(protocol.SandboxLeaseIDV1(lease))
+	var want []netip.Prefix
+	for _, entry := range lease.Network.Allow {
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			want = append(want, prefix)
+		}
+	}
+	for _, server := range b.config.Egress.DNS {
+		if addr, err := netip.ParseAddr(server); err == nil {
+			want = append(want, netip.PrefixFrom(addr, 32))
+		}
+	}
+	want = sandboxhost.CollapsePrefixes(want)
+	deadline := time.Now().Add(allowlistVerifyWait)
+	var err error
+	for {
+		if err = b.checkAllowlistActive(mac, want); err == nil {
+			return nil
+		}
+		if !time.Now().Before(deadline) || ctx.Err() != nil {
+			break
+		}
+		slog.Warn("allowlist sandbox rules are not in place yet; loading them again", "sandbox", instanceID, "error", err)
+		if refill := b.ensureEgress(); refill != nil {
+			err = refill
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(allowlistVerifyPoll):
+		}
+	}
+	if removeErr := b.removeContainer(context.WithoutCancel(ctx), instanceID); removeErr != nil {
+		err = fmt.Errorf("%w; remove it: %v", err, removeErr)
+	}
+	if ctx.Err() != nil {
+		// The caller gave up: not the miner's fault, and not reported running.
+		return fmt.Errorf("allowlist rules of sandbox %s not verified: %w (%v)", instanceID, ctx.Err(), err)
+	}
+	return fmt.Errorf("%w: allowlist rules of sandbox %s not verified within %s: %v", &miner.SandboxFault{Code: sandbox.EgressFirewallUnavailable}, instanceID, allowlistVerifyWait, err)
+}
+
+// checkAllowlistActive is one check of verifyAllowlistActive.
+func (b *GVisor) checkAllowlistActive(mac string, want []netip.Prefix) error {
+	listing, err := tenantEgressListing(*b.config.Egress)
+	if err != nil {
+		return err
+	}
+	b.egress.mu.Lock()
+	loaded := b.egress.loaded
+	b.egress.mu.Unlock()
+	if loaded == "" || listing != loaded {
+		return errors.New("the firewall tables differ from the loaded ruleset")
+	}
+	pairs, unreadable, err := loadedTenantAllowlistPairs()
+	if err != nil {
+		return err
+	}
+	if unreadable[mac] {
+		return fmt.Errorf("the allowlist set holds an element for %s it cannot read", mac)
+	}
+	have := pairs[mac]
+	if len(have) == 0 {
+		return fmt.Errorf("the allowlist set holds nothing for %s", mac)
+	}
+	for _, prefix := range want {
+		covered := false
+		for _, held := range have {
+			if held.Bits() <= prefix.Bits() && held.Contains(prefix.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return fmt.Errorf("the allowlist set lacks %s . %s", mac, prefix)
+		}
+	}
+	return nil
 }

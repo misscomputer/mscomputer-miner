@@ -70,8 +70,8 @@ readonly SELFTEST_IMAGE=docker.io/library/busybox@sha256:b7f3d86d6e84fc17718c48b
 # older MC_INSTALL_COMMIT) for a newer reviewed release; then
 # MC_INSTALL_AGENT_SHA256 must name the reviewed digest, or the build is
 # refused. The public export rewrites these two lines to the release tag.
-readonly PINNED_REF=v0.2.0
-readonly PINNED_AGENT_SHA256=a14624cf7c5ffdad115541f9479a804742b89f344b4afdac33e6710d382e46c5
+readonly PINNED_REF=v0.2.1
+readonly PINNED_AGENT_SHA256=729ec97e22777c91cb80ef1fe39a933951a7d2368dfd4caec1ef006ba1d675ce
 # BUILDINFO recipe of builds made by this installer. Builds without it (the
 # earlier recipe with VCS stamping) are checked against the earlier pin when
 # they are of its commit, otherwise against their own BUILDINFO.
