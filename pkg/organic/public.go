@@ -156,6 +156,10 @@ func (m ActiveAssignmentManifestV2) Validate() error {
 		return errors.New("manifest_previous_link_invalid")
 	}
 	endpoints := map[string]bool{}
+	// One public host carries one deployment: a route label and its blue-green
+	// attempts never appear together, so a host is checked and scored once.
+	hosts := map[string]bool{}
+	hostDuplicate := false
 	for index, deployment := range m.Deployments {
 		if err := deployment.validate(); err != nil {
 			return err
@@ -163,9 +167,13 @@ func (m ActiveAssignmentManifestV2) Validate() error {
 		if index > 0 && m.Deployments[index-1].DeploymentID >= deployment.DeploymentID {
 			return errors.New("manifest_deployments_not_canonical")
 		}
-		if deployment.RouteHost != deployment.DeploymentID+"."+m.RouteHostSuffix {
+		if deployment.RouteHost != manifestRouteLabel(deployment.DeploymentID)+"."+m.RouteHostSuffix {
 			return errors.New("manifest_route_host_invalid")
 		}
+		if hosts[deployment.RouteHost] {
+			hostDuplicate = true
+		}
+		hosts[deployment.RouteHost] = true
 		for _, replica := range deployment.Replicas {
 			if replica.ExpiresAtBlock <= m.FinalizedHeight {
 				return errors.New("manifest_replica_block_expired")
@@ -178,6 +186,9 @@ func (m ActiveAssignmentManifestV2) Validate() error {
 			}
 			endpoints[replica.EndpointID] = true
 		}
+	}
+	if hostDuplicate {
+		return errors.New("manifest_route_host_duplicate")
 	}
 	vector, err := DigestHex(m.Deployments)
 	if err != nil || vector != m.AssignmentVectorDigestSHA256 {

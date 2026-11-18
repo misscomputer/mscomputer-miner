@@ -119,6 +119,9 @@ var sandboxOpMembers = map[string]opMembers{
 	sandbox.OpFileMkdir:  {path: true, recursive: true},
 	// lease_status names only the lease: every optional member stays null.
 	sandbox.OpLeaseStatus: {},
+	sandbox.OpLeaseUsage:  {},
+	// network_set binds the new policy as its payload.
+	sandbox.OpNetworkSet: {payload: true},
 }
 
 func leaseIDNames(leaseID, sandboxID, minerID string, generation uint64) bool {
@@ -275,7 +278,7 @@ func isExecOp(op string) bool {
 func isExecStartOp(op string) bool { return op == sandbox.OpExecStart || op == sandbox.OpExecRun }
 
 func opHasResult(op string) bool {
-	return op == sandbox.OpExecRead || op == sandbox.OpFileRead || op == sandbox.OpFileList
+	return op == sandbox.OpExecRead || op == sandbox.OpFileRead || op == sandbox.OpFileList || op == sandbox.OpLeaseUsage
 }
 
 // Validate checks a received op receipt; the signature must be present.
@@ -511,6 +514,13 @@ func SandboxOpReceiptAnswersV1(r SandboxOpReceiptV1, request SandboxOpRequestV1,
 		if *r.NextOffset != stdout || r.ResultBytes != stdout+stderr ||
 			r.EOF != (stdout == r.Exec.StdoutRetained && stderr == r.Exec.StderrRetained) {
 			return errors.New("sandbox exec_run result contradicts the retained streams")
+		}
+	case sandbox.OpLeaseUsage:
+		if _, err := sandbox.DecodeLeaseUsage(result); err != nil {
+			return err
+		}
+		if *r.NextOffset != r.ResultBytes || !r.EOF {
+			return errors.New("sandbox lease_usage result binding is invalid")
 		}
 	case sandbox.OpFileList:
 		var listing sandbox.ListResult

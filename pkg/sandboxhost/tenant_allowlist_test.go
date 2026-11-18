@@ -105,3 +105,17 @@ send s5 198.19.1.9; [ "$(count 2)" = 1 ] || { echo "unlisted destination admitte
 		t.Fatalf("allowlist packets: %v\n%s", err, out)
 	}
 }
+
+// A list that withholds the resolvers (network none at runtime) pairs its
+// address with nothing; another list still gets them.
+func TestTenantAllowlistScriptNoResolvers(t *testing.T) {
+	e := testEgress()
+	lists := []TenantAllowlist{{MAC: "06:6d:73:00:00:07", NoResolvers: true}, {MAC: "06:6d:73:00:00:08"}}
+	script, err := e.TenantAllowlistScript(lists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "06:6d:73:00:00:07") || !strings.Contains(script, "06:6d:73:00:00:08 . ") {
+		t.Fatalf("script %s", script)
+	}
+}

@@ -223,6 +223,9 @@ type GVisor struct {
 	bindings sync.Mutex
 	// allowlists serializes rebuilds of the egress table's allowlist sets.
 	allowlists sync.Mutex
+	// netChanges holds runtime network_set policies (netchange.go); nil
+	// until EnableNetworkChanges. Guarded by allowlists.
+	netChanges *networkChanges
 	// allowFilled is whether the allowlist set may hold pairs: false for
 	// a freshly loaded table and after an empty rebuild; guarded by
 	// allowlists.
@@ -856,6 +859,15 @@ func (b *GVisor) create(budget *createBudget, ev *instanceEvidence, instanceID s
 		// not configure as asked is never started.
 		if err := ev.engine(b.verifyEngine(existing, s)); err != nil {
 			return err
+		}
+		if sandbox.HasCapability(lease.Capabilities, sandbox.CapabilityDocker) {
+			// Best effort: without it the nested engine keeps Docker's own
+			// pools, which is how such a lease started before.
+			if written, err := b.presetDockerDaemon(ctx, instanceID); err != nil {
+				slog.Warn("sandbox docker daemon config not preset", "sandbox", instanceID, "err", err)
+			} else {
+				slog.Info("sandbox docker daemon config", "sandbox", instanceID, "preset", written)
+			}
 		}
 		if err := b.engine.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(instanceID)+"/start", nil, nil, nil); err != nil {
 			startErr := fmt.Errorf("start sandbox %s: %w", instanceID, err)

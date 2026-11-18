@@ -66,6 +66,27 @@ const (
 	// the engine's own record. It never enters the guest, records no op,
 	// spends no tenant bound and leaves the lease and its execs unchanged.
 	OpLeaseStatus = "lease_status"
+	// OpLeaseUsage asks the miner for its own measurement of a running
+	// sandbox's resource use (LeaseUsage), from the host's cgroup and the
+	// engine, as lease_status does: it never enters the guest and records no
+	// op. The answer is informational only; nothing scores or bills by it.
+	OpLeaseUsage = "lease_usage"
+	// OpNetworkSet replaces the egress policy of a running lease created in
+	// allowlist mode. Its payload is the canonical NetworkPolicy JSON. Like
+	// lease_status it never enters the guest and records no op; the miner
+	// answers completed only after the new rules are verified in the
+	// kernel, and refuses a request issued before the policy in force.
+	OpNetworkSet = "network_set"
+)
+
+// Refusal codes of network_set.
+const (
+	// NetworkChangeUnsupported: the miner cannot change this lease's policy
+	// at runtime (no support, or the lease was not created in allowlist
+	// mode, the only mode whose confinement a rule change can retarget).
+	NetworkChangeUnsupported = "network_change_unsupported"
+	// NetworkPolicyStale: a newer network_set is already in force.
+	NetworkPolicyStale = "network_policy_stale"
 )
 
 // Bounds of the ops extension. Payload and result bytes travel base64 in a
@@ -154,12 +175,14 @@ var OpErrorAttribution = map[string]bool{
 	OpCodeResourcesExhausted: false,
 	OpCodeRuntimeFailed:      true,
 	"miner_restart":          true,
+	NetworkChangeUnsupported: false,
+	NetworkPolicyStale:       false,
 }
 
 // ValidOp reports whether value is a v1 op kind.
 func ValidOp(value string) bool {
 	switch value {
-	case OpExecStart, OpExecRun, OpExecRead, OpExecCancel, OpFileWrite, OpFileRead, OpFileStat, OpFileList, OpFileRemove, OpFileMkdir, OpLeaseStatus:
+	case OpExecStart, OpExecRun, OpExecRead, OpExecCancel, OpFileWrite, OpFileRead, OpFileStat, OpFileList, OpFileRemove, OpFileMkdir, OpLeaseStatus, OpLeaseUsage, OpNetworkSet:
 		return true
 	}
 	return false

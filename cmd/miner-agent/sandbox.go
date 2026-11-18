@@ -54,6 +54,9 @@ type sandboxOptions struct {
 	// OpsHelper, set only with --sandbox-ops on, puts the backend in ops
 	// mode with this pinned helper before any sandbox is created.
 	OpsHelper *sandboxbackend.OpsHelper
+	// NetworkStateDir, beside --state-db, records runtime network_set
+	// policies; empty leaves network_set refused as unsupported.
+	NetworkStateDir string
 	// RegistryLogin, from --image-registry-login-url, supplies credentials
 	// for pulls from the operator's image mirror.
 	RegistryLogin sandboxbackend.RegistryLogin
@@ -133,6 +136,13 @@ func openSandboxLeases(ctx context.Context, options sandboxOptions, agent *miner
 	if options.OpsHelper != nil {
 		if err := backend.EnableOps(*options.OpsHelper); err != nil {
 			return nil, fmt.Errorf("sandbox ops helper: %w", err)
+		}
+	}
+	if options.OpsHelper != nil && options.NetworkStateDir != "" {
+		// Without the egress firewall there is no allowlist to retarget:
+		// network_set stays refused as unsupported.
+		if err := backend.EnableNetworkChanges(options.NetworkStateDir); err != nil {
+			slog.Warn("runtime network policy changes are off", "error", err)
 		}
 	}
 	leases, err := store.EnableSandboxLeases(ctx)

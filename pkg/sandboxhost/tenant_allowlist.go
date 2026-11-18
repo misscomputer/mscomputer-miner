@@ -32,6 +32,9 @@ const (
 type TenantAllowlist struct {
 	MAC          string
 	Destinations []netip.Prefix
+	// NoResolvers withholds the profile's resolvers: a sandbox changed to
+	// network none at runtime reaches nothing at all.
+	NoResolvers bool
 }
 
 // AllowlistMAC reports whether mac is a canonical lower-case address of
@@ -58,6 +61,9 @@ func (e ProfileEgress) TenantAllowlistScript(lists []TenantAllowlist) (string, e
 		seen[list.MAC] = true
 		dests := append([]netip.Prefix(nil), list.Destinations...)
 		for _, server := range e.DNS {
+			if list.NoResolvers {
+				break
+			}
 			dests = append(dests, netip.PrefixFrom(netip.MustParseAddr(server), 32))
 		}
 		for _, prefix := range CollapsePrefixes(dests) {
@@ -110,4 +116,13 @@ func ApplyTenantAllowlists(e ProfileEgress, lists []TenantAllowlist) error {
 		return fmt.Errorf("load sandbox allowlists: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// String prints l as {MAC [destinations]}, marked when it withholds the
+// resolvers.
+func (l TenantAllowlist) String() string {
+	if l.NoResolvers {
+		return fmt.Sprintf("{%s %v no-resolvers}", l.MAC, l.Destinations)
+	}
+	return fmt.Sprintf("{%s %v}", l.MAC, l.Destinations)
 }
