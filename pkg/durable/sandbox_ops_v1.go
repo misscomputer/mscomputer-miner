@@ -333,8 +333,8 @@ func (o *SandboxOps) LeaseStatus(ctx context.Context, req protocol.SandboxOpRequ
 	if err := req.Validate(); err != nil {
 		return SandboxOpLeaseStatus{}, err
 	}
-	if req.Op != sandbox.OpLeaseStatus {
-		return SandboxOpLeaseStatus{}, errors.New("sandbox op is not lease_status")
+	if req.Op != sandbox.OpLeaseStatus && req.Op != sandbox.OpLeaseUsage && req.Op != sandbox.OpNetworkSet {
+		return SandboxOpLeaseStatus{}, errors.New("sandbox op is not lease_status, lease_usage or network_set")
 	}
 	tx, err := o.db.BeginTx(ctx, nil)
 	if err != nil {

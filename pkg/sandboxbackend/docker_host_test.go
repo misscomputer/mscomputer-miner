@@ -90,6 +90,10 @@ func TestDockerLeaseOnDindHost(t *testing.T) {
 	if err := e.call(ctx, http.MethodPost, "/containers/create", url.Values{"name": {name}}, body, nil); err != nil {
 		t.Fatal(err)
 	}
+	// The backend presets the nested engine's daemon config before start.
+	if written, err := (&GVisor{engine: e}).presetDockerDaemon(ctx, name); err != nil || !written {
+		t.Fatalf("docker daemon config preset: written %v, %v", written, err)
+	}
 	if err := e.call(ctx, http.MethodPost, "/containers/"+name+"/start", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}

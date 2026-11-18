@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -263,6 +264,7 @@ func run() error {
 	}
 	if opsSettings != nil {
 		options.OpsHelper = &opsSettings.helper
+		options.NetworkStateDir = filepath.Join(filepath.Dir(*stateDB), "sandbox-network")
 	}
 	sandboxLane, err := openSandboxLeases(sandboxCtx, options, agent, store)
 	sandboxCancel()

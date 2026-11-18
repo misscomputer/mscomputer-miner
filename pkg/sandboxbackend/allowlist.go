@@ -97,6 +97,9 @@ func (b *GVisor) syncAllowlists(ctx context.Context, pending ...pendingAllowlist
 		return fmt.Errorf("list allowlist sandboxes: %w", err)
 	}
 	byMAC := map[string][]string{}
+	// noResolvers marks the addresses of leases changed to none.
+	noResolvers := map[string]bool{}
+	live := map[string]bool{}
 	owner := map[string]string{}
 	collided := map[string]bool{}
 	// claim records leaseID's allow entries under its MAC; a second lease
@@ -121,7 +124,16 @@ func (b *GVisor) syncAllowlists(ctx context.Context, pending ...pendingAllowlist
 			slog.Warn("allowlist sandbox label is unreadable; it reaches nothing", "sandbox", firstName(listed), "error", err)
 			continue
 		}
-		claim(listed.Labels[LabelLeaseID], allow)
+		leaseID := listed.Labels[LabelLeaseID]
+		live[leaseID] = true
+		if changed, resolvers, ok := b.changedAllowlist(leaseID); ok {
+			// A runtime network_set replaces the create-time label.
+			allow = changed
+			if !resolvers {
+				noResolvers[allowlistMAC(leaseID)] = true
+			}
+		}
+		claim(leaseID, allow)
 	}
 	for leaseID, allow := range b.allowPending {
 		claim(leaseID, allow)
@@ -146,7 +158,7 @@ func (b *GVisor) syncAllowlists(ctx context.Context, pending ...pendingAllowlist
 	lists := make([]sandboxhost.TenantAllowlist, 0, len(macs))
 	resolved := map[string][]netip.Prefix{}
 	for _, mac := range macs {
-		list := sandboxhost.TenantAllowlist{MAC: mac}
+		list := sandboxhost.TenantAllowlist{MAC: mac, NoResolvers: noResolvers[mac]}
 		for _, entry := range byMAC[mac] {
 			if prefix, err := netip.ParsePrefix(entry); err == nil {
 				list.Destinations = append(list.Destinations, prefix)
@@ -171,6 +183,10 @@ func (b *GVisor) syncAllowlists(ctx context.Context, pending ...pendingAllowlist
 		return err
 	}
 	b.allowFilled = len(lists) != 0
+	for leaseID := range b.allowPending {
+		live[leaseID] = true
+	}
+	b.pruneNetworkChanges(live)
 	for _, p := range pending {
 		if b.allowPending == nil {
 			b.allowPending = map[string][]string{}

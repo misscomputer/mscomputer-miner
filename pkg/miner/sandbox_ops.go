@@ -329,6 +329,21 @@ func (l *SandboxLane) Op(ctx context.Context, r protocol.SandboxOpRequestV1, pay
 		}
 		return receipt, nil, nil
 	}
+	if r.Op == sandbox.OpLeaseUsage {
+		// As lease_status: no in-flight slot, no op record, no guest entry.
+		receipt, result, err := l.leaseUsage(ctx, ops, r)
+		if err != nil {
+			return protocol.SandboxOpReceiptV1{}, nil, l.opFailure(err)
+		}
+		return receipt, result, nil
+	}
+	if r.Op == sandbox.OpNetworkSet {
+		receipt, err := l.networkSet(ctx, ops, r, payload)
+		if err != nil {
+			return protocol.SandboxOpReceiptV1{}, nil, l.opFailure(err)
+		}
+		return receipt, nil, nil
+	}
 	release, ok := ops.reserve(opBytes(r))
 	if !ok {
 		// No durable replay decision was made. Even an exec_start may be
@@ -506,6 +521,69 @@ func (l *SandboxLane) leaseStatus(ctx context.Context, ops *sandboxOps, r protoc
 		return l.opReceipt(r, sandbox.OpStageRefused, "sandbox_exited", observed)
 	}
 	return l.opReceipt(r, sandbox.OpStageCompleted, "", observed)
+}
+
+// SandboxUsageBackend is the optional backend side of lease_usage. A backend
+// without it answers every lease_usage ops_unsupported.
+type SandboxUsageBackend interface {
+	// Usage measures the running sandbox instanceID; it returns
+	// ErrSandboxNotRunning for a sandbox the engine says is not running.
+	Usage(ctx context.Context, instanceID string) (sandbox.LeaseUsage, error)
+}
+
+// leaseUsage answers a lease_usage from the lease record and the backend's
+// measurement, fenced as leaseStatus is. It records no op, so an exact
+// replay measures again.
+func (l *SandboxLane) leaseUsage(ctx context.Context, ops *sandboxOps, r protocol.SandboxOpRequestV1) (protocol.SandboxOpReceiptV1, []byte, error) {
+	if l.isClosed() {
+		return protocol.SandboxOpReceiptV1{}, nil, ErrSandboxLaneClosed
+	}
+	stateCtx, cancel := ops.state(ctx)
+	status, err := ops.store.LeaseStatus(stateCtx, r)
+	err = l.durableErr(stateCtx, err)
+	cancel()
+	if err != nil {
+		return protocol.SandboxOpReceiptV1{}, nil, err
+	}
+	if status.Unavailable != nil {
+		receipt, err := l.leaseRefusal(r, status.Unavailable, status.DecidedAt)
+		return receipt, nil, err
+	}
+	backend, ok := ops.backend.(SandboxUsageBackend)
+	if !ok {
+		receipt, err := l.opReceipt(r, sandbox.OpStageRefused, sandbox.OpCodeOpsUnsupport, later(l.now().UTC(), status.DecidedAt))
+		return receipt, nil, err
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, sandbox.LeaseStatusBudget)
+	usage, err := backend.Usage(inspectCtx, SandboxInstanceName(r.LeaseID))
+	expired := inspectCtx.Err() != nil
+	cancel()
+	if l.base.Err() != nil {
+		return protocol.SandboxOpReceiptV1{}, nil, ErrSandboxLaneClosed
+	}
+	observed := later(l.now().UTC(), status.DecidedAt)
+	var result []byte
+	if err == nil {
+		result, err = organic.Canonical(usage)
+	}
+	switch {
+	case errors.Is(err, ErrSandboxNotRunning):
+		receipt, err := l.opReceipt(r, sandbox.OpStageRefused, "sandbox_exited", observed)
+		return receipt, nil, err
+	case err != nil && expired:
+		receipt, err := l.opReceipt(r, sandbox.OpStageTimedOut, sandbox.OpCodeDeadline, observed)
+		return receipt, nil, err
+	case err != nil:
+		receipt, err := l.opReceipt(r, sandbox.OpStageFailed, sandbox.OpCodeRuntimeFailed, observed)
+		return receipt, nil, err
+	}
+	receipt, err := l.opBase(r, sandbox.OpStageCompleted, observed)
+	if err != nil {
+		return protocol.SandboxOpReceiptV1{}, nil, err
+	}
+	digest, size := protocol.SandboxContentDigestV1(result), uint64(len(result))
+	receipt.ResultDigest, receipt.ResultBytes, receipt.NextOffset, receipt.EOF = &digest, size, &size, true
+	return receipt, result, l.signOp(&receipt)
 }
 
 // --- file operations ---

@@ -124,6 +124,47 @@ def _unreserved_label(value: str) -> str:
 RouteLabel = Annotated[DNSLabel, AfterValidator(_unreserved_label)]
 
 
+#: A blue-green attempt deployment ID: ``<parent route label>-r<8 lowercase hex>``.
+_ATTEMPT_DEPLOYMENT_ID: Final = re.compile(r"(.+)-r([0-9a-f]{8})")
+_DNS_LABEL_RE: Final = re.compile(_DNS_LABEL)
+
+
+def _valid_route_label(value: str) -> bool:
+    return (
+        len(value) <= 63
+        and _DNS_LABEL_RE.fullmatch(value) is not None
+        and not value.startswith(RESERVED_ROUTE_PREFIXES)
+    )
+
+
+def parse_attempt_deployment_id(deployment_id: str) -> tuple[str, str] | None:
+    """``(parent route label, nonce)`` of an attempt deployment ID, else ``None``.
+
+    An attempt ID names one runtime placement attempt of a route label
+    (blue-green redeploy): one DNS label of at most 63 characters,
+    ``<parent>-r<8 lowercase hex>``, whose parent is a valid unreserved route
+    label that is not itself an attempt ID. It serves under the parent label's
+    public host; its replica and endpoint IDs derive from the attempt ID.
+    """
+
+    if not _valid_route_label(deployment_id):
+        return None
+    match = _ATTEMPT_DEPLOYMENT_ID.fullmatch(deployment_id)
+    if match is None:
+        return None
+    parent, nonce = match.group(1), match.group(2)
+    if not _valid_route_label(parent) or _ATTEMPT_DEPLOYMENT_ID.fullmatch(parent):
+        return None
+    return parent, nonce
+
+
+def route_label_of_deployment(deployment_id: str) -> str:
+    """The route label a deployment serves under: an attempt's parent, else itself."""
+
+    attempt = parse_attempt_deployment_id(deployment_id)
+    return deployment_id if attempt is None else attempt[0]
+
+
 def _go_utc_timestamp(value: str) -> str:
     if not value.endswith("Z"):
         raise ValueError("timestamp_not_utc")
@@ -783,7 +824,8 @@ class ActiveAssignmentManifestV2(StrictFrozenModel):
         if ids != sorted(set(ids)):
             raise ValueError("manifest_deployments_not_canonical")
         for item in self.deployments:
-            if item.route_host != f"{item.deployment_id}.{self.route_host_suffix}":
+            label = route_label_of_deployment(item.deployment_id)
+            if item.route_host != f"{label}.{self.route_host_suffix}":
                 raise ValueError("manifest_route_host_invalid")
             for replica in item.replicas:
                 if replica.expires_at_block <= self.finalized_height:
@@ -793,6 +835,12 @@ class ActiveAssignmentManifestV2(StrictFrozenModel):
         endpoints = [r.endpoint_id for item in self.deployments for r in item.replicas]
         if len(set(endpoints)) != len(endpoints):
             raise ValueError("manifest_endpoint_duplicate")
+        # One public host carries one deployment: a route label and its
+        # blue-green attempts never appear together, so a host is checked and
+        # scored once per manifest.
+        hosts = [item.route_host for item in self.deployments]
+        if len(set(hosts)) != len(hosts):
+            raise ValueError("manifest_route_host_duplicate")
         vector = [model_document(item) for item in self.deployments]
         if self.assignment_vector_digest_sha256 != digest(vector):
             raise ValueError("assignment_vector_digest_sha256_mismatch")
@@ -909,7 +957,10 @@ class ActiveAssignmentManifestV3(StrictFrozenModel):
         if ids != sorted(set(ids)):
             raise ValueError("manifest_deployments_not_canonical")
         for item in self.deployments:
-            if item.route_host != f"{item.deployment_id}.{self.route_host_suffix}":
+            label = item.deployment_id
+            if isinstance(item, OciDeploymentAssignmentV3):
+                label = route_label_of_deployment(item.deployment_id)
+            if item.route_host != f"{label}.{self.route_host_suffix}":
                 raise ValueError("manifest_route_host_invalid")
             for replica in item.replicas:
                 if replica.expires_at_block <= self.finalized_height:
@@ -919,6 +970,12 @@ class ActiveAssignmentManifestV3(StrictFrozenModel):
         endpoints = [r.endpoint_id for item in self.deployments for r in item.replicas]
         if len(set(endpoints)) != len(endpoints):
             raise ValueError("manifest_endpoint_duplicate")
+        # One public host carries one deployment: a route label and its
+        # blue-green attempts never appear together, so a host is checked and
+        # scored once per manifest.
+        hosts = [item.route_host for item in self.deployments]
+        if len(set(hosts)) != len(hosts):
+            raise ValueError("manifest_route_host_duplicate")
         vector = [model_document(item) for item in self.deployments]
         if self.assignment_vector_digest_sha256 != digest(vector):
             raise ValueError("assignment_vector_digest_sha256_mismatch")

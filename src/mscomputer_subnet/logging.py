@@ -39,6 +39,20 @@ class JSONFormatter(logging.Formatter):
             "elapsed_ms",
             "refresh_timed_out",
             "discovery_failure",
+            "alert",
+            "reason",
+            "staged_publication_id",
+            "staged_block",
+            "committed_publication_id",
+            "ack_publication_id",
+            "inventory_publication_id",
+            "inventory_block",
+            "inventory_ready",
+            "differing_identity_count",
+            "differing_hotkeys",
+            "miner_set_diff",
+            "diff_baseline",
+            "foreign_reads",
         ):
             if hasattr(record, key):
                 item = getattr(record, key)

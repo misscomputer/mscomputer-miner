@@ -287,7 +287,58 @@ class HotkeySigningFacade:
         )
 
 
+#: A btauth signature older than this when its request headers are about to
+#: be written is replaced by a fresh one. The receiver's freshness window is
+#: 10 s; a busy event loop (or a slow connect) between ``auth_flow`` and the
+#: write must not spend it.
+RESIGN_AFTER_SECONDS: float = 3.0
+
+
+class SignLag:
+    """Process-wide sign-to-send telemetry: the largest delay seen between
+    signing in ``auth_flow`` and the header write, and the re-sign count."""
+
+    __slots__ = ("max_seconds", "resigned", "sent")
+
+    def __init__(self) -> None:
+        self.max_seconds = 0.0
+        self.resigned = 0
+        self.sent = 0
+
+    def note(self, seconds: float, resigned: bool) -> None:
+        self.sent += 1
+        self.resigned += int(resigned)
+        self.max_seconds = max(self.max_seconds, seconds)
+
+    def snapshot(self) -> dict[str, float | int]:
+        return {
+            "sign_to_send_max_seconds": round(self.max_seconds, 3),
+            "signed_requests": self.sent,
+            "resigned_requests": self.resigned,
+        }
+
+
+SIGN_LAG = SignLag()
+
+
+def _replace_headers(
+    raw: list[tuple[bytes, bytes]], signed: Mapping[str, str]
+) -> list[tuple[bytes, bytes]]:
+    names = {name.lower().encode() for name in signed}
+    kept = [(name, value) for name, value in raw if name.lower() not in names]
+    return kept + [(name.encode(), value.encode()) for name, value in signed.items()]
+
+
 class HotkeyAuth(httpx.Auth):
+    """btauth/1 request signing, applied at send time.
+
+    ``auth_flow`` signs as usual; it also installs an httpcore ``trace``
+    hook that runs after the connection (TCP and TLS) is established, right
+    before the request headers are written. If the signature is then older
+    than :data:`RESIGN_AFTER_SECONDS`, the hook signs again (fresh nonce)
+    and swaps the headers, so time spent connecting or waiting for a busy
+    event loop never counts against the receiver's freshness window."""
+
     requires_request_body = True
     __slots__ = ("__signing", "receiver")
 
@@ -295,16 +346,82 @@ class HotkeyAuth(httpx.Auth):
         self.__signing = signing
         self.receiver = receiver_ss58
 
-    def auth_flow(self, request: httpx.Request) -> Any:
-        request.headers.update(
-            self.__signing.sign_http_request(
-                method=request.method,
-                path=request.url.raw_path.decode(),
-                body=request.content,
-                receiver_ss58=self.receiver,
-            )
+    def _sign(self, request: httpx.Request) -> dict[str, str]:
+        return self.__signing.sign_http_request(
+            method=request.method,
+            path=request.url.raw_path.decode(),
+            body=request.content,
+            receiver_ss58=self.receiver,
         )
+
+    def _at_send(self, request: httpx.Request, signed_at: float, info: Mapping[str, Any]) -> None:
+        age = time.monotonic() - signed_at
+        resign = age > RESIGN_AFTER_SECONDS
+        if resign:
+            sent = info.get("request")
+            headers = getattr(sent, "headers", None)
+            if isinstance(headers, list):
+                headers[:] = _replace_headers(headers, self._sign(request))
+            else:  # pragma: no cover - httpcore always passes the request
+                resign = False
+        SIGN_LAG.note(age, resign)
+
+    def _flow(self, request: httpx.Request, *, asynchronous: bool) -> Any:
+        request.headers.update(self._sign(request))
+        signed_at = time.monotonic()
+        previous = request.extensions.get("trace")
+        # A redirect or resend shares the extensions dict: drop an earlier
+        # hop's hook, which would re-sign with that hop's method and path.
+        previous = getattr(previous, "_hotkey_auth_previous", previous)
+        event = "http11.send_request_headers.started"
+        if asynchronous:
+
+            async def trace(name: str, info: dict[str, Any]) -> None:
+                if name == event:
+                    self._at_send(request, signed_at, info)
+                if previous is not None:
+                    await previous(name, info)
+
+            trace._hotkey_auth_previous = previous  # type: ignore[attr-defined]
+            request.extensions["trace"] = trace
+        else:
+
+            def sync_trace(name: str, info: dict[str, Any]) -> None:
+                if name == event:
+                    self._at_send(request, signed_at, info)
+                if previous is not None:
+                    previous(name, info)
+
+            sync_trace._hotkey_auth_previous = previous  # type: ignore[attr-defined]
+            request.extensions["trace"] = sync_trace
         yield request
+
+    def auth_flow(self, request: httpx.Request) -> Any:
+        yield from self._flow(request, asynchronous=False)
+
+    def sync_auth_flow(self, request: httpx.Request) -> Any:
+        if self.requires_request_body:
+            request.read()
+        flow = self._flow(request, asynchronous=False)
+        request = next(flow)
+        while True:
+            response = yield request
+            try:
+                request = flow.send(response)
+            except StopIteration:
+                break
+
+    async def async_auth_flow(self, request: httpx.Request) -> Any:
+        if self.requires_request_body:
+            await request.aread()
+        flow = self._flow(request, asynchronous=True)
+        request = next(flow)
+        while True:
+            response = yield request
+            try:
+                request = flow.send(response)
+            except StopIteration:
+                break
 
 
 class SQLiteNonceStore:

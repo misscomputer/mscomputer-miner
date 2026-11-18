@@ -29,6 +29,8 @@ type opsBackend struct {
 	// running and inspects serve the lease_status tests.
 	running  func(ctx context.Context, instance string) (bool, error)
 	inspects int
+	// usage serves the lease_usage tests; nil answers an empty measurement.
+	usage func(ctx context.Context, instance string) (sandbox.LeaseUsage, error)
 	// helperRuns counts every entry into the guest, valid request or not.
 	helperRuns atomic.Int64
 }
@@ -55,6 +57,13 @@ func (b *opsBackend) Running(ctx context.Context, instance string) (bool, error)
 		return true, nil
 	}
 	return b.running(ctx, instance)
+}
+
+func (b *opsBackend) Usage(ctx context.Context, instance string) (sandbox.LeaseUsage, error) {
+	if b.usage == nil {
+		return sandbox.LeaseUsage{}, nil
+	}
+	return b.usage(ctx, instance)
 }
 
 func (b *opsBackend) count(op string) int {

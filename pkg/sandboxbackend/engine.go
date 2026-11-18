@@ -101,7 +101,10 @@ func (e *engine) requestWith(ctx context.Context, client *http.Client, method, p
 // X-Registry-Auth).
 func (e *engine) requestWithHeaders(ctx context.Context, client *http.Client, method, path string, query url.Values, body any, headers http.Header) (*http.Response, error) {
 	var reader io.Reader
-	if body != nil {
+	contentType := "application/json"
+	if raw, ok := body.(rawBody); ok {
+		reader, contentType = bytes.NewReader(raw.data), raw.contentType
+	} else if body != nil {
 		payload, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
@@ -117,7 +120,7 @@ func (e *engine) requestWithHeaders(ctx context.Context, client *http.Client, me
 		return nil, err
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	for name, values := range headers {
 		for _, value := range values {
@@ -140,6 +143,12 @@ func (e *engine) requestWithHeaders(ctx context.Context, client *http.Client, me
 		return nil, &engineError{Status: resp.StatusCode, Message: bounded(message.Message)}
 	}
 	return resp, nil
+}
+
+// rawBody is a request body sent as is (an archive upload), not as JSON.
+type rawBody struct {
+	data        []byte
+	contentType string
 }
 
 // call performs one request and decodes a JSON answer into out, if out is
