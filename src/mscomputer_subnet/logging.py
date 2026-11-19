@@ -53,6 +53,9 @@ class JSONFormatter(logging.Formatter):
             "miner_set_diff",
             "diff_baseline",
             "foreign_reads",
+            "publication_rows",
+            "publication_payload_bytes",
+            "publication_payload_bound_bytes",
         ):
             if hasattr(record, key):
                 item = getattr(record, key)

@@ -196,6 +196,7 @@ func (a *api) registerSandboxRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/sandbox/leases", sandboxHandler(a, a.sandbox.Commit))
 	mux.HandleFunc("POST /v1/sandbox/renewals", sandboxHandler(a, a.sandbox.Renew))
 	mux.HandleFunc("POST /v1/sandbox/releases", sandboxHandler(a, a.sandbox.Release))
+	mux.HandleFunc("POST /v1/sandbox/image-prefetches", a.sandboxImagePrefetch)
 	if a.sandbox.OpsEnabled() {
 		mux.HandleFunc("POST /v1/sandbox/ops", a.sandboxOps)
 	}

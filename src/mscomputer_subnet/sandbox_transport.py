@@ -286,3 +286,101 @@ class SandboxOpsResponseV1(StrictFrozenModel):
     request_id: RequestID
     receipt: SandboxDocument
     result_b64: OpChunk | None
+
+
+# Image prefetch (sandbox-image-prefetch-v1). The validator runtime signs one
+# request per miner naming a digest-pinned image; the miner agent verifies it
+# like a lease document, pulls the image into its warm cache under the create
+# pull rules, and answers at once with a signed receipt (cached, pulling or
+# refused). The neuron hops only authenticate and route.
+
+PREFETCH_SYNAPSE_VERSION: Final = "subnet-sandbox-image-prefetch-synapse.v1"
+#: Advertised by a miner agent whose backend keeps prefetched images.
+PREFETCH_CAPABILITY_FEATURE: Final = "sandbox-image-prefetch-v1"
+PREFETCH_REQUEST_SCHEMA: Final = _SCHEMA_PREFIX + "sandbox-image-prefetch"
+PREFETCH_RECEIPT_SCHEMA: Final = _SCHEMA_PREFIX + "sandbox-image-prefetch-receipt"
+#: Stable bridge detail for a prefetch the validator refused to send because
+#: the miner does not advertise ``sandbox-image-prefetch-v1``.
+SANDBOX_PREFETCH_CAPABILITY_UNSUPPORTED: Final = "sandbox_prefetch_capability_unsupported"
+
+ImageDigest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
+
+
+class PrefetchHeader(BaseModel):
+    """Routing view of a prefetch request; the Go contract checks the rest."""
+
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True, populate_by_name=True)
+
+    contract_schema: str = Field(alias="schema")
+    schema_version: Literal[1]
+    miner_id: Hotkey
+    image_digest: ImageDigest
+    subnet: StaticSubnetBinding
+
+    @model_validator(mode="after")
+    def miner_is_bound(self) -> Self:
+        if self.miner_id != self.subnet.miner_hotkey:
+            raise ValueError("miner_id_mismatch")
+        return self
+
+
+def prefetch_header(document: SandboxDocument) -> PrefetchHeader:
+    """The routing header of a validator-signed prefetch request."""
+
+    if document.get("schema") != PREFETCH_REQUEST_SCHEMA:
+        raise ValueError("sandbox_document_kind_mismatch")
+    try:
+        return PrefetchHeader.model_validate(document)
+    except ValueError as exc:
+        raise ValueError("sandbox_document_invalid") from exc
+
+
+def prefetch_receipt_answers(receipt: SandboxDocument, header: PrefetchHeader) -> None:
+    """Refuse an agent answer that is not a prefetch receipt for this request.
+    The Go runtime verifies the miner signature and the document digest."""
+
+    if (
+        receipt.get("schema") != PREFETCH_RECEIPT_SCHEMA
+        or receipt.get("miner_id") != header.miner_id
+        or receipt.get("image_digest") != header.image_digest
+    ):
+        raise ValueError(SANDBOX_RECEIPT_MISMATCH)
+
+
+class SandboxPrefetchSynapseV1(StrictFrozenModel):
+    """Validator -> miner: one validator-signed image prefetch request."""
+
+    protocol: Literal["subnet-sandbox-image-prefetch-synapse.v1"]
+    request_id: RequestID
+    current_block: Count
+    caller_hotkey: Hotkey
+    validator_binding: ServiceKeyBinding
+    document: SandboxDocument
+
+
+class LocalSandboxPrefetchRequestV1(StrictFrozenModel):
+    """Miner Python -> Go agent loopback form of one btauth-verified prefetch."""
+
+    protocol: Literal["subnet-sandbox-image-prefetch-synapse.v1"]
+    request_id: RequestID
+    current_block: Count
+    caller_hotkey: Hotkey
+    binding_verified: Literal[True]
+    validator_binding: ServiceKeyBinding
+    document: SandboxDocument
+
+
+class BridgeSandboxPrefetchRequestV1(StrictFrozenModel):
+    """Validator runtime -> validator neuron loopback request: one prefetch."""
+
+    protocol: Literal["subnet-sandbox-image-prefetch-synapse.v1"]
+    request_id: RequestID
+    document: SandboxDocument
+
+
+class SandboxPrefetchResponseV1(StrictFrozenModel):
+    """Go agent -> miner -> validator: the miner-signed prefetch receipt."""
+
+    protocol: Literal["subnet-sandbox-image-prefetch-synapse.v1"]
+    request_id: RequestID
+    receipt: SandboxDocument

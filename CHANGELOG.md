@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.3.0
+
+- Docker-capable sandboxes come with nested Docker address pools preset, so
+  projects with many networks (for example large compose files) start
+  without restarting the inner engine. An image's own
+  `/etc/docker/daemon.json` is never replaced.
+- New sandbox op `lease_usage`: reports a running sandbox's host-side CPU,
+  peak memory, disk and network use. Informational only.
+- New sandbox op `network_set`: changes a running `allowlist` sandbox's
+  egress policy in place.
+- Image prefetch (`sandbox-image-prefetch-v1`): the agent accepts signed,
+  digest-pinned prefetch requests and pulls the image into its warm image
+  cache ahead of use, through the same checks as a create.
+
 ## v0.2.1
 
 - Sandboxes now report ready only after network rules are active. An
