@@ -170,6 +170,9 @@ type SandboxLane struct {
 	// direct is the direct file transfer extension; nil unless
 	// EnableDirectFiles succeeded.
 	direct *directFiles
+
+	// prefetch is the in-flight image prefetch set (sandbox_prefetch.go).
+	prefetch prefetches
 }
 
 // NewSandboxLane enables the lane only with a backend that runs sandboxes

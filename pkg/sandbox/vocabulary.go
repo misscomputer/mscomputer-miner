@@ -47,6 +47,10 @@ const (
 	// over TLS on DirectFilesPort of its axon host, streamed into the
 	// sandbox in one helper run. Required by policy; there is no opt-out.
 	DirectFilesCapabilityFeature = "sandbox-direct-files-v1"
+	// ImagePrefetchCapabilityFeature promises validator image prefetch: the
+	// miner pulls a signed, digest-pinned image into its warm image cache
+	// ahead of any lease (POST /v1/sandbox/image-prefetches).
+	ImagePrefetchCapabilityFeature = "sandbox-image-prefetch-v1"
 	// DirectFilesPort is the public TCP port of the direct-files endpoint
 	// on the miner's axon IP.
 	DirectFilesPort = 8094

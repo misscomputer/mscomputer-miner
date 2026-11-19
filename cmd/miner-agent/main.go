@@ -582,6 +582,9 @@ func (a *api) features() []string {
 		if a.sandbox.DockerEnabled() {
 			features = append(features, sandbox.DockerCapabilityFeature)
 		}
+		if a.sandbox.ImagePrefetchEnabled() {
+			features = append(features, sandbox.ImagePrefetchCapabilityFeature)
+		}
 	}
 	return features
 }

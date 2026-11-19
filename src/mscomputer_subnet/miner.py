@@ -73,10 +73,13 @@ from .protocol import (
 )
 from .sandbox_transport import (
     LocalSandboxOpsRequestV1,
+    LocalSandboxPrefetchRequestV1,
     LocalSandboxRequestV1,
     SandboxDocumentHeader,
     SandboxOpsResponseV1,
     SandboxOpsSynapseV1,
+    SandboxPrefetchResponseV1,
+    SandboxPrefetchSynapseV1,
     SandboxResponseV1,
     SandboxSynapseV1,
 )
@@ -814,6 +817,59 @@ class MinerNeuron:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return result
 
+    async def _sandbox_prefetch_forward(self, request: Request) -> SandboxPrefetchResponseV1:
+        """Forward one validator-signed image prefetch request to the Go agent
+        after the same btauth and identity checks as a lease document. The
+        agent verifies the document, answers at once and pulls in the
+        background; it bounds its own concurrent pulls."""
+
+        body = await self._body(request)
+        caller = await self._authenticated(request, body)
+        if _envelope_protocol(body) != sandbox_transport.PREFETCH_SYNAPSE_VERSION:
+            raise HTTPException(
+                status_code=422,
+                detail="only subnet-sandbox-image-prefetch-synapse.v1 requests are accepted",
+            )
+        try:
+            synapse = parse_document(body, SandboxPrefetchSynapseV1)
+            header = sandbox_transport.prefetch_header(synapse.document)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if synapse.caller_hotkey != caller.hotkey:
+            raise HTTPException(status_code=403, detail="body caller differs from btauth caller")
+        await self._verify_assignment_identity(
+            caller.hotkey, synapse.current_block, synapse.validator_binding, header.subnet
+        )
+        local = LocalSandboxPrefetchRequestV1(
+            protocol=sandbox_transport.PREFETCH_SYNAPSE_VERSION,
+            request_id=synapse.request_id,
+            current_block=synapse.current_block,
+            caller_hotkey=caller.hotkey,
+            binding_verified=True,
+            validator_binding=synapse.validator_binding,
+            document=synapse.document,
+        )
+        async with self.gate.slot(caller.priority):
+            try:
+                result = await self.bridge.request(
+                    "POST",
+                    "/v1/sandbox/image-prefetches",
+                    value=local,
+                    response_model=SandboxPrefetchResponseV1,
+                )
+            except BridgeError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+            except ValidationError as exc:
+                raise HTTPException(status_code=502, detail=SANDBOX_AGENT_ANSWER_INVALID) from exc
+        assert isinstance(result, SandboxPrefetchResponseV1)
+        try:
+            if result.request_id != synapse.request_id:
+                raise ValueError(sandbox_transport.SANDBOX_RECEIPT_MISMATCH)
+            sandbox_transport.prefetch_receipt_answers(result.receipt, header)
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return result
+
     def _sandbox_route(self, kind: str) -> None:
         async def forward(request: Request) -> SandboxResponseV1:
             return await self._sandbox_forward(kind, request)
@@ -838,6 +894,13 @@ class MinerNeuron:
         if self.sandbox_leases:
             for kind in sandbox_transport.DOCUMENT_SCHEMAS:
                 self._sandbox_route(kind)
+            self.app.add_api_route(
+                "/api/v1/sandbox/image-prefetches",
+                self._sandbox_prefetch_forward,
+                methods=["POST"],
+                response_model=None,
+                name="sandbox_image_prefetch",
+            )
         if self.sandbox_ops:
             self.app.add_api_route(
                 "/api/v1/sandbox/ops",
